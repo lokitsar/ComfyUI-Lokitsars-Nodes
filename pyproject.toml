@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/lokitsar/ComfyUI-Lokitsars-Nodes"
+Repository = "https://github.com/lokitsar/Comfyui-Lokitsars-Nodes"
 
 [tool.comfy]
 PublisherId = "lokitsar"

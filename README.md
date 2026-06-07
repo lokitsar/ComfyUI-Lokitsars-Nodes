@@ -167,18 +167,26 @@ Paired with a local, uncensored model, the enhancer describes content faithfully
 
 ## Installation
 
-### Option 1 — ComfyUI Manager (recommended)
-Search for **Workflow Gallery** in ComfyUI Manager and install directly.
+### Option 1 — ComfyUI Manager (Install via Git URL)
+In ComfyUI Manager, choose **Install via Git URL** and paste:
 
-### Option 2 — Manual
-1. Copy this folder into `ComfyUI/custom_nodes/` (folder name `ComfyUI-Lokitsars-Nodes`)
-2. Restart ComfyUI
-3. Find **Workflow Gallery** under `image/ui` and **Prompt Library** under `utils/prompt`
+```text
+https://github.com/lokitsar/Comfyui-Lokitsars-Nodes
+```
+
+Then restart ComfyUI. (This pack isn't in the Manager registry, so a name search won't find it — use the Git URL.)
+
+### Option 2 — Manual (git)
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/lokitsar/Comfyui-Lokitsars-Nodes
+```
+Then restart ComfyUI. All three nodes appear under the **Lokitsar's Nodes** menu when you add a node.
 
 ```text
 ComfyUI/
 └── custom_nodes/
-    └── ComfyUI-Lokitsars-Nodes/
+    └── Comfyui-Lokitsars-Nodes/
         ├── nodes.py
         ├── danbooru_tags.txt
         ├── js/
