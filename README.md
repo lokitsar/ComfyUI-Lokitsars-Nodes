@@ -4,7 +4,7 @@ A suite of ComfyUI custom nodes for reviewing, comparing, exporting, and reusing
 
 ## Version
 
-Current release: **v0.1.20**
+Current release: **v0.1.21**
 
 ## Why I made this
 
@@ -14,10 +14,11 @@ A practical use case is generating multiple showcase images for wildcard packs, 
 
 ## Nodes
 
-This package includes two nodes:
+This package includes three nodes:
 
 - **Workflow Gallery** — image gallery, viewer, comparison, and export (`image/ui`)
 - **Prompt Library** — save, search, and reuse prompts across workflows (`utils/prompt`)
+- **Prompt Enhancer** — expand a rough idea (and/or a reference image) into a model-tuned generation prompt via a local or cloud LLM (`utils/prompt`)
 
 ---
 
@@ -108,6 +109,62 @@ A persistent prompt manager that lives directly in your workflow. Save, search, 
 
 ---
 
+## Prompt Enhancer
+
+Turn a rough idea — or a reference image — into a detailed prompt tuned to the model you're generating with. The node calls an LLM (local or cloud), enhances your input, and outputs a `STRING` you can wire into a text encoder or another node.
+
+### Features
+- Optional `prompt` (STRING) input and optional `image` (IMAGE) input — use either or both
+- Outputs a `STRING` — connect it to a CLIPTextEncode `text` input or any string consumer
+- **Target-model presets**, each written to that model's actual prompting rules:
+  - **Flux / Z-Image** — natural-language description, no negatives
+  - **Illustrious / SDXL Anime** — Danbooru tags with the correct rating and quality tags
+  - **LTX Video 2.3** — cinematic single-shot video prompt with audio
+  - **Wan 2.2 Video** — cinematic motion prompt
+  - **Custom** — general-purpose enhancement
+- **Text-to-X vs Image-to-X**: with no image connected the node writes a text-to-image/video prompt; connect an image and it automatically switches to the matching image-to-video / image-reference preset for the selected model (for video models, it describes the motion that plays out from the frame rather than re-describing the still)
+- **🔌 Connect** — fetches the available model list from your API and fills the model dropdown
+- **↺ Reset** — restores the system prompt from the selected preset
+- **thinking_mode** toggle — suppresses chain-of-thought on models that support it (works across backends)
+- **manual_addons** — extra instructions appended to every request
+- Graceful fallback — if the LLM call fails, your original prompt passes through unchanged
+
+### Backends
+All OpenAI-compatible `/chat/completions` endpoints:
+
+| Backend | URL | Notes |
+|---|---|---|
+| Ollama | `http://localhost:11434/v1` | Local; falls back to the native API if needed |
+| OpenRouter | `https://openrouter.ai/api/v1` | Cloud; API key saved separately |
+| NanoGPT | `https://nano-gpt.com/api/v1` | Cloud; API key saved separately |
+| Kobold | `http://localhost:5001/v1` | Local |
+
+### Image input (vision models)
+Connect an `IMAGE` to use a vision-capable model (e.g. a local Qwen2.5-VL, or a cloud VL model) to read the picture and write a prompt from it. A non-reasoning instruction-tuned vision model gives the cleanest results.
+
+### Content
+Paired with a local, uncensored model, the enhancer describes content faithfully across the full range from everyday to explicit, instead of omitting obvious details. All subjects are treated as adults; the node never produces sexual, nude, or suggestive descriptions of anyone who is or appears to be a minor.
+
+### Node Inputs
+
+| Input | Type | Default | Description |
+|---|---|---|---|
+| enabled | BOOLEAN | true | Toggle the enhancer on/off (off passes the prompt through) |
+| backend | CHOICE | Ollama | Ollama / OpenRouter / NanoGPT / Kobold |
+| api_url | STRING | localhost Ollama | Endpoint; auto-fills when you switch backend |
+| api_key | STRING | — | Active key (auto-fills from the saved cloud keys) |
+| model_name | STRING | — | Model id; set via **Connect** or typed |
+| target_model | CHOICE | Flux / Z-Image | Which model the output prompt is tuned for |
+| system_prompt | STRING | preset | Editable system prompt (per target model) |
+| manual_addons | STRING | — | Extra instructions appended to the request |
+| max_tokens | INT | 512 | Response length cap |
+| thinking_mode | BOOLEAN | false | Suppress/allow model chain-of-thought |
+| seed | INT | 0 | 0 = random; non-zero for reproducibility |
+| prompt | STRING | — | (optional) rough prompt to enhance |
+| image | IMAGE | — | (optional) reference image for vision models |
+
+---
+
 ## Installation
 
 ### Option 1 — ComfyUI Manager (recommended)
@@ -123,9 +180,11 @@ ComfyUI/
 └── custom_nodes/
     └── ComfyUI-Workflow-Gallery/
         ├── nodes.py
+        ├── danbooru_tags.txt
         ├── js/
         │   ├── workflow_gallery.js
-        │   └── prompt_library.js
+        │   ├── prompt_library.js
+        │   └── prompt_enhancer.js
         └── ...
 ```
 
