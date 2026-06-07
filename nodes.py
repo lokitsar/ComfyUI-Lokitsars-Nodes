@@ -43,37 +43,46 @@ PROMPT_LIBRARY_OUTPUTS: Dict[str, str] = {}
 import random
 import re as _re
 
-def _find_wildcard_dirs() -> List[Path]:
-    """Auto-detect wildcard directories from known locations as fallback."""
-    comfy_root = Path(folder_paths.get_output_directory()).parent
-    candidates = [
-        comfy_root / "wildcards",
-        comfy_root / "custom_nodes" / "ComfyUI-Impact-Pack" / "wildcards",
-        comfy_root / "custom_nodes" / "wildcards",
-        comfy_root / "custom_nodes" / "ComfyUI_Wildcards" / "wildcards",
-        comfy_root / "custom_nodes" / "comfyui-wildcards" / "wildcards",
-    ]
-    found = [p for p in candidates if p.exists() and p.is_dir()]
-    for p in found:
-        print(f"[PromptLibrary] Auto-detected wildcard dir: {p}", flush=True)
-    return found
+# ── Wildcard directory setup ─────────────────────────────────────────────────
+# NODE_WILDCARDS_DIR: guaranteed default inside the package — always exists.
+# Users drop .txt or .yaml wildcard files here.
+# wildcard_path widget is ADDITIVE — any extra paths are searched in addition.
+NODE_WILDCARDS_DIR = PACKAGE_DIR / "wildcards"
+NODE_WILDCARDS_DIR.mkdir(parents=True, exist_ok=True)
+print(f"[PromptLibrary] Default wildcard dir: {NODE_WILDCARDS_DIR}", flush=True)
 
-WILDCARD_DIRS: List[Path] = _find_wildcard_dirs()
+# Auto-detect common extra locations (additive, not replacing default)
+_EXTRA_AUTO_DIRS: List[Path] = []
+_comfy_root = Path(folder_paths.get_output_directory()).parent
+for _candidate in [
+    _comfy_root / "wildcards",
+    _comfy_root / "custom_nodes" / "ComfyUI-Impact-Pack" / "wildcards",
+]:
+    if _candidate.exists() and _candidate.is_dir() and _candidate != NODE_WILDCARDS_DIR:
+        _EXTRA_AUTO_DIRS.append(_candidate)
+        print(f"[PromptLibrary] Also found wildcard dir: {_candidate}", flush=True)
 
 
-def _resolve_wildcard_dirs(wildcard_path: str) -> List[Path]:
-    """Resolve wildcard directories from user-specified paths (comma separated),
-    falling back to auto-detected dirs if none specified."""
-    if not wildcard_path or not wildcard_path.strip():
-        return WILDCARD_DIRS
-    dirs: List[Path] = []
-    for part in wildcard_path.split(","):
-        p = Path(part.strip())
-        if p.exists() and p.is_dir():
-            dirs.append(p)
-        else:
-            print(f"[PromptLibrary] Wildcard path not found: {p}", flush=True)
-    return dirs if dirs else WILDCARD_DIRS
+def _resolve_wildcard_dirs(extra_path: str) -> List[Path]:
+    """Build the wildcard search list.
+    Always starts with NODE_WILDCARDS_DIR, then auto-detected extras,
+    then any user-specified extra paths (comma-separated).
+    """
+    dirs: List[Path] = [NODE_WILDCARDS_DIR]
+    for d in _EXTRA_AUTO_DIRS:
+        if d not in dirs:
+            dirs.append(d)
+    if extra_path and extra_path.strip():
+        for part in extra_path.split(","):
+            p = Path(part.strip())
+            if p.exists() and p.is_dir():
+                if p not in dirs:
+                    dirs.append(p)
+                    print(f"[PromptLibrary] Added extra wildcard dir: {p}", flush=True)
+            else:
+                print(f"[PromptLibrary] Extra wildcard path not found: {p!r}", flush=True)
+    print(f"[PromptLibrary] Wildcard search dirs: {[str(d) for d in dirs]}", flush=True)
+    return dirs
 
 
 def _read_wildcard_lines_txt(path: Path) -> List[str]:
@@ -82,82 +91,113 @@ def _read_wildcard_lines_txt(path: Path) -> List[str]:
             if l.strip() and not l.strip().startswith("#")]
 
 
+# Cache parsed YAML files so we only pay the parse cost once per session.
+_YAML_CACHE: Dict[str, List[str]] = {}
+
 def _read_wildcard_lines_yaml(path: Path, name_parts: List[str]) -> List[str]:
-    """Read lines from a .yaml wildcard file, optionally navigating nested keys."""
-    try:
-        import yaml  # type: ignore
-        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
-    except ImportError:
-        # yaml not available — try basic manual parse for simple list format
-        lines = []
-        in_list = False
-        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("- "):
-                lines.append(stripped[2:].strip())
-            elif stripped.endswith(":") and not stripped.startswith("-"):
-                in_list = True
-        return lines
-    except Exception:
+    """Read lines from a .yaml wildcard file with a thread timeout to prevent
+    blocking ComfyUI's main thread on large or malformed files.
+    Results are cached per file path so repeated wildcard use is fast."""
+    import concurrent.futures as _cf
+
+    cache_key = f"{path}|{'/'.join(name_parts)}"
+    if cache_key in _YAML_CACHE:
+        return _YAML_CACHE[cache_key]
+
+    def _parse():
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
+        except ImportError:
+            # PyYAML not available — minimal line parser for simple list format
+            lines = []
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    lines.append(stripped[2:].strip())
+            return lines
+        except Exception as e:
+            print(f"[PromptLibrary] YAML parse error in {path}: {e}", flush=True)
+            return []
+
+        # Navigate nested keys: __colors/dark__ -> colors.yaml key "dark"
+        for key in name_parts:
+            if isinstance(data, dict) and key in data:
+                data = data[key]
+            elif isinstance(data, dict):
+                key_lower = key.lower()
+                match = next((v for k, v in data.items() if k.lower() == key_lower), None)
+                if match is not None:
+                    data = match
+                else:
+                    break
+
+        # Flatten to list of strings
+        if isinstance(data, list):
+            return [str(item).strip() for item in data if item]
+        elif isinstance(data, dict):
+            result = []
+            for v in data.values():
+                if isinstance(v, list):
+                    result.extend(str(i).strip() for i in v if i)
+                elif v:
+                    result.append(str(v).strip())
+            return result
+        elif isinstance(data, str):
+            return [data.strip()]
         return []
 
-    # Navigate nested keys if name had path components after the filename
-    # e.g. for file "colors.yaml" with key "dark", use name_parts=["dark"]
-    for key in name_parts:
-        if isinstance(data, dict) and key in data:
-            data = data[key]
-        elif isinstance(data, dict):
-            # Try case-insensitive match
-            key_lower = key.lower()
-            match = next((v for k, v in data.items() if k.lower() == key_lower), None)
-            if match is not None:
-                data = match
-            else:
-                break
-
-    # Flatten to list of strings
-    if isinstance(data, list):
-        return [str(item).strip() for item in data if item]
-    elif isinstance(data, dict):
-        # Return all values flattened
+    # Run the parse in a thread with a 5-second timeout.
+    # If it takes longer (huge file, filesystem stall) we skip it rather than freeze.
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_parse)
+            lines = future.result(timeout=5.0)
+    except _cf.TimeoutError:
+        print(f"[PromptLibrary] YAML load timed out for {path} — skipping. "
+              f"Consider converting to .txt for faster loading.", flush=True)
         lines = []
-        for v in data.values():
-            if isinstance(v, list):
-                lines.extend(str(i).strip() for i in v if i)
-            elif v:
-                lines.append(str(v).strip())
-        return lines
-    elif isinstance(data, str):
-        return [data.strip()]
-    return []
+    except Exception as e:
+        print(f"[PromptLibrary] YAML load failed for {path}: {e}", flush=True)
+        lines = []
+
+    _YAML_CACHE[cache_key] = lines
+    return lines
 
 
 def _find_wildcard_file_in_dirs(name: str, dirs: List[Path]):
-    """Find a wildcard file (txt or yaml) by name within given directories."""
+    """Find a wildcard file (.txt, .yaml, .yml) by name within given directories.
+    Tries exact filename match first (fast), then falls back to case-insensitive rglob.
+    YAML files are loaded via _read_wildcard_lines_yaml which uses a thread timeout
+    to prevent blocking ComfyUI on large files."""
     name_norm = name.replace("\\", "/")
     name_lower = name_norm.lower()
 
     for wdir in dirs:
-        # Exact txt match
+        # Fast exact match — txt preferred, then yaml
         for ext in (".txt", ".yaml", ".yml"):
             candidate = wdir / f"{name_norm}{ext}"
             if candidate.exists():
                 return candidate, []
-        # Case-insensitive search across txt and yaml
-        for wfile in wdir.rglob("*"):
-            if wfile.suffix.lower() not in (".txt", ".yaml", ".yml"):
-                continue
-            rel = wfile.relative_to(wdir).with_suffix("").as_posix().lower()
-            if rel == name_lower:
-                return wfile, []
-            # Support yaml files where the wildcard name includes a key
-            # e.g. __colors/dark__ -> look for colors.yaml with key "dark"
-            parts = name_lower.split("/")
-            for i in range(len(parts), 0, -1):
-                file_part = "/".join(parts[:i])
-                key_parts = parts[i:]
-                if rel == file_part:
-                    return wfile, key_parts
+
+        # Case-insensitive fallback scan
+        try:
+            for wfile in wdir.rglob("*"):
+                if wfile.suffix.lower() not in (".txt", ".yaml", ".yml"):
+                    continue
+                rel = wfile.relative_to(wdir).with_suffix("").as_posix().lower()
+                if rel == name_lower:
+                    return wfile, []
+                # Support yaml key navigation: __colors/dark__ -> colors.yaml["dark"]
+                parts = name_lower.split("/")
+                for i in range(len(parts), 0, -1):
+                    file_part = "/".join(parts[:i])
+                    key_parts = parts[i:]
+                    if rel == file_part:
+                        return wfile, key_parts
+        except Exception as e:
+            print(f"[PromptLibrary] Error scanning {wdir}: {e}", flush=True)
+
     return None, []
 
 
@@ -1253,12 +1293,20 @@ class PromptLibrary:
     OUTPUT_NODE = False
 
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Always re-execute so wildcard randomization runs every queue
+        # and the node never gets skipped due to ComfyUI output caching.
+        return float("nan")
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "selected_prompt_id": ("STRING", {"default": "", "multiline": False}),
+                "manual_text": ("STRING", {"default": "", "multiline": True, "placeholder": "Type here or connect a STRING wire"}),
+                "manual_position": (["after", "before"],),
                 "expand_wildcards": ("BOOLEAN", {"default": False}),
-                "wildcard_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Path to wildcards folder (comma separated for multiple)"}),
+                "wildcard_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Optional: extra wildcard folder(s), comma separated. Node wildcards/ folder is always searched first."}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "hidden": {
@@ -1266,15 +1314,30 @@ class PromptLibrary:
             },
         }
 
-    def get_prompt(self, selected_prompt_id: str = "", expand_wildcards: bool = False, wildcard_path: str = "", seed: int = 0, unique_id: str | None = None):
+    def get_prompt(self, selected_prompt_id: str = "", manual_text: str = "", manual_position: str = "after", expand_wildcards: bool = False, wildcard_path: str = "", seed: int = 0, unique_id: str | None = None):
         node_id = str(unique_id or "")
-        output = selected_prompt_id
+
+        # Build combined output from selected prompt + manual text
+        selected = selected_prompt_id.strip()
+        manual = manual_text.strip()
+
+        if manual and selected:
+            output = f"{manual}, {selected}" if manual_position == "before" else f"{selected}, {manual}"
+        elif selected:
+            output = selected
+        elif manual:
+            output = manual
+        else:
+            output = ""
+
         if expand_wildcards and output:
             dirs = _resolve_wildcard_dirs(wildcard_path)
-            # Seed random so each generation picks differently but is reproducible
             rng = random.Random(seed)
             output = _expand_wildcards(output, dirs, rng=rng)
             print(f"[PromptLibrary] Wildcard expanded (seed={seed}): {output[:100]!r}", flush=True)
+
+        print(f"[PromptLibrary] Output: selected={selected[:40]!r} manual={manual[:40]!r} combined={output[:80]!r}", flush=True)
+
         if node_id:
             PROMPT_LIBRARY_OUTPUTS[node_id] = output
         return (output,)
@@ -1403,12 +1466,615 @@ async def prompt_library_export(request):
         )
 
 
+# ── Prompt Enhancer ───────────────────────────────────────────────────────────
+
+def _load_danbooru_tags() -> str:
+    """Load the danbooru tags reference file and return as a condensed tag list string."""
+    tags_file = PACKAGE_DIR / "danbooru_tags.txt"
+    if not tags_file.exists():
+        return ""
+    try:
+        lines = tags_file.read_text(encoding="utf-8").splitlines()
+        tags = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("["):
+                continue
+            tags.extend([t.strip() for t in line.split(",") if t.strip()])
+        return ", ".join(tags)
+    except Exception as e:
+        print(f"[PromptEnhancer] Could not load danbooru_tags.txt: {e}", flush=True)
+        return ""
+
+_DANBOORU_TAGS = _load_danbooru_tags()
+
+
+PROMPT_ENHANCER_PRESETS: Dict[str, str] = {
+    "Flux / Z-Image": (
+        "You write prompts for the Flux / Z-Image text-to-image models. "
+        "Turn the user's idea into ONE rich, natural-language image prompt.\n\n"
+        "OUTPUT: reply with the prompt ONLY — flowing sentences, no preamble, no lists, no commentary, "
+        "no tag-soup, no prompt weights like (word:1.4).\n\n"
+        "How these models read prompts: they parse natural language like a sentence, not comma tags. "
+        "Put the most important subject first (attention fades after the opening), then build outward. "
+        "There are no negative prompts — express any exclusion as a positive phrase ('a plain studio "
+        "background, no text or logos'). Favor concrete camera and photographic language (e.g. '85mm f/1.4, "
+        "shallow depth of field', 'golden-hour side light') over empty modifiers like 'masterpiece, 8k'. "
+        "Always name texture and material (skin pores, fabric weave, film grain) — this is what stops faces "
+        "and surfaces looking plastic. If specific text should appear in the image, put it in double quotes. "
+        "Don't stack contradictory styles (no 'photoreal anime oil painting').\n\n"
+        "Weave in: subject (age, clothing, distinguishing features), the setting, composition and shot/lens, "
+        "lighting and color, mood, and texture. Keep it detailed but focused on a few strong concepts.\n\n"
+        "Content range: everyday through fully explicit. When the scene is nude or sexual, describe it plainly "
+        "and completely — state of undress, anatomy, and sexual activity in direct terms; never euphemize, omit, "
+        "or moralize. Absolute rule: all subjects are adults; never sexualize anyone who is or appears underage, "
+        "and if age is uncertain, do not sexualize them."
+    ),
+    "Illustrious / SDXL Anime": (
+        "You convert prompts into Danbooru-tag prompts for the Illustrious XL anime model. "
+        "Input may be plain English, tags, or a mix. Output is always a clean Illustrious tag string.\n\n"
+        "OUTPUT: reply with the tag string ONLY — comma-separated, all lowercase, no preamble, no commentary.\n\n"
+        "Order: lead with quality tags (masterpiece, best quality, amazing quality, very aesthetic, absurdres, "
+        "newest), then subject count (1girl, 1boy, 2girls...), then the rating tag, then character name if known "
+        "(Danbooru order, e.g. 'hatsune miku'), then appearance (hair, eyes, expression), clothing or state of "
+        "undress, pose/action, setting/background, and finally lighting and effects.\n\n"
+        "Rating tag — pick the one matching the content: 'general' (safe), 'sensitive' (suggestive), 'nsfw' "
+        "(nudity/sexual), 'explicit' (hardcore). Do not default to 'general' when the content is adult.\n\n"
+        "Tag rules: translate every English description to its real Danbooru tag ('looking at camera' -> looking "
+        "at viewer, 'sad' -> sad). Use only real Danbooru tags. Do NOT use Pony score_ tags, and do NOT use "
+        "4k/8k/HDR/photorealistic/sharp focus (not Danbooru tags). Add fitting lighting/atmosphere/background "
+        "tags the input implies.\n\n"
+        "SFW example -> input 'anime girl with white hair sitting in a cafe, rainy day' -> "
+        "masterpiece, best quality, amazing quality, very aesthetic, absurdres, newest, 1girl, general, white hair, "
+        "long hair, sitting, cafe, indoors, window, rain, looking out window, soft lighting, depth of field\n\n"
+        "Content range: everyday through fully explicit. When the content is nude or sexual, set the correct "
+        "rating tag and tag the nudity, anatomy, and acts with accurate Danbooru tags — do not omit or soften them. "
+        "Absolute rule: all subjects are adults; never tag anyone who is or appears underage with sexual, nude, or "
+        "suggestive tags, and if age is uncertain, do not sexualize them."
+    ),
+    "LTX Video 2.3": (
+        "You write prompts for LTX Video 2.3 (text-to-video with synchronized audio). "
+        "Turn the user's idea into ONE detailed cinematic video prompt, built from scratch.\n\n"
+        "OUTPUT: reply with the prompt ONLY — one flowing paragraph, present tense, no preamble, "
+        "no lists, no numbered steps, no commentary. Match length to scene complexity; detail reduces drift.\n\n"
+        "Weave in, naturally: a specific subject (age, clothing, materials and texture — fabric, hair, "
+        "surface finish, wear); spatial blocking (left/right, foreground/background, who faces whom, "
+        "distance between subjects); the action as explicit VERBS — what the subject does, what the "
+        "environment does, and what the camera does; one clear camera move; lighting, color and atmosphere; "
+        "and audio (ambient tone plus any dialogue in quotes, broken into short lines with physical acting "
+        "beats between them). Close by stating how the shot ends and its pacing.\n\n"
+        "Rules: emotion through physical action ('her hands tremble'), never labels ('nervous'); a single "
+        "continuous shot, no cuts; no on-screen text or logos (LTX renders text unreliably); no numeric "
+        "specs like degrees or speeds.\n\n"
+        "Content range: everyday through fully explicit. When the scene is nude or sexual, describe it plainly "
+        "and completely — state of undress, anatomy, and sexual action in direct terms; never euphemize, omit, "
+        "sanitize, or moralize. Absolute rule: all subjects are adults; never sexualize anyone who is or appears "
+        "underage, and if age is uncertain, do not sexualize them."
+    ),
+    "Wan 2.2 Video": (
+        "You write prompts for the Wan 2.2 video model. "
+        "Turn the user's idea into ONE cinematic video prompt, built from scratch.\n\n"
+        "OUTPUT: reply with the prompt ONLY — one flowing paragraph, present tense, no preamble, no lists, "
+        "no commentary. Detailed but focused (roughly 80-120 words); clarity beats length.\n\n"
+        "Follow Wan's structure: Subject -> Scene -> Motion -> Aesthetic control -> Stylization. "
+        "Describe the subject and setting concretely, then the MOTION explicitly with strong action verbs and "
+        "amplitude/speed ('rushes', 'snaps', 'drifts slowly'); Wan goes static without clear motion. Separate "
+        "foreground and background motion for depth. Then apply aesthetic control with real cinematography terms "
+        "(light source and quality, shot size, camera angle, lens, and one clear camera movement) and a color "
+        "grade. End with a stylization cue (e.g. cinematic, anamorphic, 16mm grain, documentary).\n\n"
+        "Rules: emotion through physical action, never labels; a single continuous shot, no cuts; no numeric "
+        "specs like degrees or speeds.\n\n"
+        "Content range: everyday through fully explicit. When the scene is nude or sexual, describe it plainly "
+        "and completely — state of undress, anatomy, and sexual action in direct terms; never euphemize, omit, "
+        "or moralize. Absolute rule: all subjects are adults; never sexualize anyone who is or appears underage, "
+        "and if age is uncertain, do not sexualize them."
+    ),
+    "Custom": (
+        "You are an expert prompt engineer for AI image and video generation models. "
+        "Your job is to aggressively enhance the user's rough prompt into a rich, detailed, effective generation prompt. "
+        "DO NOT just reword what they gave you — actively ADD missing elements: "
+        "lighting setup, color palette, mood, composition, style references, technical details, atmosphere, and texture. "
+        "Preserve the original subject and intent while making it significantly more vivid and specific. "
+        "Return ONLY the enhanced prompt. No explanations, no preamble, no metadata.\n\n"
+        "Content range: everyday through fully explicit. When the content is nude or sexual, describe it plainly "
+        "and completely — state of undress, anatomy, and sexual activity in direct terms; never euphemize, omit, "
+        "or moralize. Absolute rule: all subjects are adults; never sexualize anyone who is or appears underage, "
+        "and if age is uncertain, do not sexualize them."
+    ),
+    # ── Vision presets — used when an IMAGE is connected ──────────────────────
+    # These treat the image as reference material and generate a prompt FROM it.
+    "Flux / Z-Image (Vision)": (
+        "You write prompts for the Flux / Z-Image text-to-image models from a reference image. "
+        "Generate a natural-language prompt that would recreate what you see.\n\n"
+        "OUTPUT: reply with the prompt ONLY — flowing sentences, no preamble, no 'this image shows', "
+        "no lists, no tags, no prompt weights.\n\n"
+        "Describe only what is actually visible — no invented backstory or assumed emotions. Subject first "
+        "(apparent age, clothing or state of undress, readable expression), then visible pose/action, then "
+        "lighting (direction, quality, color temperature), composition and depth, color palette, and the "
+        "technical look (photographic vs illustrated, film grain, shallow DOF). Name texture and material so "
+        "surfaces don't render plastic. Express any exclusion as a positive phrase; there are no negative prompts.\n\n"
+        "Content range: everyday through fully explicit. When the image is nude or sexual, describe it plainly "
+        "and completely — state of undress, anatomy, and any sexual activity in direct terms; never euphemize, "
+        "omit, or sanitize. Absolute rule: treat all subjects as adults; never sexualize anyone who is or appears "
+        "underage, and if age is uncertain, do not sexualize them."
+    ),
+    "Illustrious / SDXL Anime (Vision)": (
+        "You generate a Danbooru-tag prompt for the Illustrious XL anime model from a reference image, "
+        "tagging what is visible so the image can be recreated.\n\n"
+        "OUTPUT: reply with the tag string ONLY — comma-separated, all lowercase, no preamble, no "
+        "'this image shows', no commentary. Tag only what is actually visible; do not invent details.\n\n"
+        "Order: lead with quality tags (masterpiece, best quality, amazing quality, very aesthetic, absurdres, "
+        "newest), then subject count (1girl, 1boy...), then the rating tag, then character name only if certain, "
+        "then hair, eyes, expression, each clothing item or state of undress, pose/body position, "
+        "setting/background, and finally lighting and visible effects.\n\n"
+        "Rating tag — match the content: 'general' (safe), 'sensitive' (suggestive), 'nsfw' (nudity/sexual), "
+        "'explicit' (hardcore). Do not default to 'general' when the image is adult.\n\n"
+        "Tag rules: real Danbooru tags only. No Pony score_ tags. No 4k/8k/HDR/photorealistic. All lowercase, "
+        "comma separated.\n\n"
+        "Content range: everyday through fully explicit. When the image is nude or sexual, set the correct rating "
+        "tag and tag the nudity, anatomy, and acts with accurate Danbooru tags — do not omit or soften them. "
+        "Absolute rule: treat all subjects as adults; never tag anyone who is or appears underage with sexual, "
+        "nude, or suggestive tags, and if age is uncertain, do not sexualize them."
+    ),
+    "LTX Video 2.3 (Vision)": (
+        "You write prompts for LTX Video 2.3 (image-to-video with synchronized audio). "
+        "The attached image is the FIRST FRAME. Write what happens next.\n\n"
+        "OUTPUT: reply with the prompt ONLY — one flowing paragraph, present tense, no preamble, "
+        "no image description, no lists, no commentary.\n\n"
+        "CRITICAL — this is image-to-video, so do NOT re-describe what's already visible (appearance, "
+        "setting, and lighting are given by the image). Describe MOTION and the transition from stillness, "
+        "using explicit VERBS: what the subject does, how the environment moves, and what the camera does. "
+        "Add one clear camera move and an audio layer (ambient tone plus any dialogue in quotes, broken into "
+        "short lines with physical acting beats). Close by stating how the shot ends and its pacing.\n\n"
+        "Rules: emotion through physical action ('her jaw tightens'), never labels; a single continuous shot, "
+        "no cuts; no numeric specs like degrees or speeds. If the subject is clearly mid-speech you may add one "
+        "short fitting line in quotes — but do not deliberate; if unsure, leave dialogue out.\n\n"
+        "Content range: everyday through fully explicit. When the image is nude or sexual, describe the action "
+        "plainly and completely — state of undress, anatomy, and sexual motion in direct terms; never euphemize, "
+        "omit, or sanitize. Absolute rule: treat all subjects as adults; never sexualize anyone who is or appears "
+        "underage, and if age is uncertain, do not sexualize them."
+    ),
+    "Wan 2.2 Video (Vision)": (
+        "You write prompts for the Wan 2.2 video model in image-to-video mode. "
+        "The attached image is the FIRST FRAME. Write the motion that plays out from it.\n\n"
+        "OUTPUT: reply with the prompt ONLY — one flowing paragraph, present tense, no preamble, no image "
+        "description, no lists, no commentary. Roughly 80-120 words.\n\n"
+        "CRITICAL — the image already sets subject, scene, and style, so do NOT re-describe them. Focus on "
+        "MOTION and camera: explicit action verbs with amplitude and speed ('rushes', 'drifts slowly'), "
+        "separated foreground and background motion for depth, and one clear camera movement (dolly-in, "
+        "tracking, crane up, handheld). Add a color-grade/lighting cue only as it evolves over the shot.\n\n"
+        "Rules: emotion through physical action, never labels; a single continuous shot, no cuts; no numeric "
+        "specs like degrees or speeds.\n\n"
+        "Content range: everyday through fully explicit. When the image is nude or sexual, describe the action "
+        "plainly and completely — state of undress, anatomy, and sexual motion in direct terms; never euphemize, "
+        "omit, or sanitize. Absolute rule: treat all subjects as adults; never sexualize anyone who is or appears "
+        "underage, and if age is uncertain, do not sexualize them."
+    ),
+    "Custom (Vision)": (
+        "You are a visual analyst and prompt engineer for AI image and video generation models. "
+        "You are looking at a reference image. Generate a detailed generation prompt that would recreate or extend it. "
+        "\n\nRULES:"
+        "\n- ONLY describe what is visually observable — no assumptions, no abstract feelings"
+        "\n- Describe: subject, visible pose/action, lighting, composition, color palette, style, atmosphere"
+        "\n- Be specific and concrete — avoid vague adjectives like 'beautiful' or 'stunning'"
+        "\n- NO negative language, NO 'avoid' instructions"
+        "\n\nReturn ONLY the prompt. No explanations, no preamble.\n\n"
+        "Content range: everyday through fully explicit. When the image is nude or sexual, describe it plainly "
+        "and completely — state of undress, anatomy, and any sexual activity in direct terms; never euphemize, "
+        "omit, or sanitize. Absolute rule: treat all subjects as adults; never sexualize anyone who is or appears "
+        "underage, and if age is uncertain, do not sexualize them."
+    ),
+}
+
+PROMPT_ENHANCER_DEFAULT_URLS: Dict[str, str] = {
+    "Ollama": "http://localhost:11434/v1",
+    "OpenRouter": "https://openrouter.ai/api/v1",
+    "NanoGPT": "https://nano-gpt.com/api/v1",
+    "Kobold": "http://localhost:5001/v1",
+}
+
+
+class PromptEnhancer:
+    CATEGORY = "utils/prompt"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("enhanced_prompt",)
+    FUNCTION = "enhance"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Always re-execute — LLM output is non-deterministic and ComfyUI would otherwise
+        # cache and skip the node when inputs look identical.
+        return float("nan")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Vision variants are auto-selected at runtime when an IMAGE is connected —
+        # don't expose them in the dropdown.
+        preset_names = [k for k in PROMPT_ENHANCER_PRESETS if not k.endswith("(Vision)")]
+        return {
+            "required": {
+                "enabled": ("BOOLEAN", {"default": True}),
+                "backend": (["Ollama", "OpenRouter", "NanoGPT", "Kobold"],),
+                "api_url": ("STRING", {"default": "http://localhost:11434/v1", "multiline": False}),
+                "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Active API key (auto-fills from saved keys below)"}),
+                "openrouter_key": ("STRING", {"default": "", "multiline": False, "placeholder": "OpenRouter API key — saved permanently"}),
+                "nanogpt_key": ("STRING", {"default": "", "multiline": False, "placeholder": "NanoGPT API key — saved permanently"}),
+                "model_name": ("STRING", {"default": "llama3", "multiline": False, "placeholder": "e.g. llama3, gpt-4o, mistral"}),
+                "target_model": (preset_names,),
+                "system_prompt": ("STRING", {"default": PROMPT_ENHANCER_PRESETS["Flux / Z-Image"], "multiline": True}),
+                "manual_addons": ("STRING", {"default": "", "multiline": True, "placeholder": "Extra instructions or context (optional)..."}),
+                "max_tokens": ("INT", {"default": 512, "min": 64, "max": 4096}),
+                "thinking_mode": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "prompt": ("STRING", {"forceInput": True}),
+                "image": ("IMAGE",),
+            },
+        }
+
+    def enhance(
+        self,
+        enabled: bool = True,
+        backend: str = "Ollama",
+        api_url: str = "http://localhost:11434/v1",
+        api_key: str = "",
+        openrouter_key: str = "",
+        nanogpt_key: str = "",
+        model_name: str = "llama3",
+        target_model: str = "Flux / Z-Image",
+        system_prompt: str = "",
+        manual_addons: str = "",
+        max_tokens: int = 512,
+        thinking_mode: bool = False,
+        seed: int = 0,
+        prompt: str = "",
+        image=None,
+    ):
+        print(f"[PromptEnhancer] Got prompt={prompt!r:.60} enabled={enabled} model={model_name} thinking={thinking_mode} seed={seed} has_image={image is not None}", flush=True)
+
+        if not enabled or (not prompt.strip() and image is None):
+            print(f"[PromptEnhancer] Bypassing — enabled={enabled} prompt_empty={not prompt.strip()}", flush=True)
+            return (prompt,)
+
+        # Use saved key for OpenRouter/NanoGPT if api_key is blank
+        active_key = api_key.strip()
+        if not active_key:
+            if backend == "OpenRouter" and openrouter_key.strip():
+                active_key = openrouter_key.strip()
+            elif backend == "NanoGPT" and nanogpt_key.strip():
+                active_key = nanogpt_key.strip()
+
+        # Build user message — support image input for VL models
+        import io as _io
+        import base64 as _b64
+
+        # System prompt resolution. Text mode = the target model's text preset (or the
+        # user's edited system_prompt widget). When an IMAGE is connected we swap in the
+        # matching "(Vision)" preset so the model is actually told to read the image and
+        # emit a prompt in the target format — UNLESS the user hand-edited the system
+        # prompt, in which case we respect their edit.
+        text_default = PROMPT_ENHANCER_PRESETS.get(target_model, "")
+        sys_content = system_prompt.strip() or text_default
+        user_edited_system = bool(system_prompt.strip()) and system_prompt.strip() != text_default.strip()
+
+        user_content: Any
+        if image is not None:
+            # Convert tensor image to base64 PNG
+            try:
+                import numpy as _np
+                from PIL import Image as _PILImage
+                img_array = (_np.clip(image[0].cpu().numpy(), 0, 1) * 255).astype(_np.uint8)
+                pil_img = _PILImage.fromarray(img_array)
+                buf = _io.BytesIO()
+                pil_img.save(buf, format="PNG")
+                img_b64 = _b64.b64encode(buf.getvalue()).decode("utf-8")
+
+                # Auto-select the vision system prompt for this target model
+                # (falls back to the text preset if no vision variant exists).
+                if not user_edited_system:
+                    sys_content = PROMPT_ENHANCER_PRESETS.get(f"{target_model} (Vision)") or text_default
+
+                # The user's prompt is a DIRECTIVE, not background noise — keep it
+                # primary. Text goes BEFORE the image (more reliable across VL backends).
+                if prompt.strip():
+                    text_part = (
+                        "Use the attached image as the visual reference and follow the "
+                        f"system instructions. Apply this user direction: {prompt.strip()}"
+                    )
+                else:
+                    text_part = "Generate a prompt from the attached image, following the system instructions."
+                if manual_addons.strip():
+                    text_part += f"\n\nAdditional instructions: {manual_addons.strip()}"
+
+                user_content = [
+                    {"type": "text", "text": text_part},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                ]
+                _vmode = "user-edited, kept" if user_edited_system else "auto-selected"
+                print(f"[PromptEnhancer] Image attached ({pil_img.size[0]}x{pil_img.size[1]}) — vision system prompt {_vmode}", flush=True)
+            except Exception as img_err:
+                print(f"[PromptEnhancer] Image encode failed: {img_err} — falling back to text only", flush=True)
+                user_content = prompt.strip()
+                if manual_addons.strip():
+                    user_content += f"\n\nAdditional instructions: {manual_addons.strip()}"
+        else:
+            user_content = prompt.strip()
+            if manual_addons.strip():
+                user_content += f"\n\nAdditional instructions: {manual_addons.strip()}"
+
+        # Reasoning control that works on ALL backends (not just OpenRouter's `thinking`
+        # param). Qwen3 / many reasoning models honor a /no_think (or /think) soft switch
+        # placed in the prompt. Without this, models like Qwen3 think on every call and
+        # burn the token budget before producing an answer — and the thinking_mode
+        # checkbox does nothing on Ollama/Kobold/NanoGPT. Harmless text for models that
+        # don't recognize it.
+        if not thinking_mode:
+            sys_content = f"{sys_content}\n\n/no_think".strip()
+        else:
+            sys_content = f"{sys_content}\n\n/think".strip()
+
+        messages = [
+            {"role": "system", "content": sys_content},
+            {"role": "user", "content": user_content},
+        ]
+
+        # All backends use OpenAI-compatible /chat/completions
+        base_url = api_url.rstrip("/")
+        endpoint = f"{base_url}/chat/completions"
+
+        headers = {"Content-Type": "application/json"}
+        if active_key:
+            headers["Authorization"] = f"Bearer {active_key}"
+        # OpenRouter requires these headers or returns 400
+        if backend == "OpenRouter":
+            headers["HTTP-Referer"] = "https://github.com/lokitsar/ComfyUI-Workflow-Gallery"
+            headers["X-Title"] = "ComfyUI Prompt Enhancer"
+
+        import urllib.request as _urlreq
+        import urllib.error as _urlerr
+        import json as _json
+
+        # Detect Ollama native base (strip /v1 suffix if present)
+        ollama_base = base_url
+        if ollama_base.endswith("/v1"):
+            ollama_base = ollama_base[:-3]
+
+        def _msg_text(msg):
+            """Pull assistant text from an OpenAI-style message, tolerating reasoning
+            models that leave `content` null and stash text in a reasoning field, and
+            APIs that return content as a list of parts. Never returns None."""
+            if not isinstance(msg, dict):
+                return ""
+            content = msg.get("content")
+            if isinstance(content, list):  # content-as-parts (some providers)
+                content = "".join(
+                    part.get("text", "") for part in content if isinstance(part, dict)
+                )
+            if not content:  # null/empty -> fall back to reasoning fields
+                content = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            return (content or "").strip()
+
+        # Stop sequences: cut generation at the reflection cue words reasoning models
+        # use to second-guess themselves ("Refining…", "Revised…", "Drafting…"). These
+        # never occur inside a real prompt. (Do NOT stop on "\n\n": some runs open with a
+        # reasoning preamble, and "\n\n" would cut the answer off before it even starts.)
+        _stop = ["\nRefining", "\nRevised", "\nDrafting", "\nNote:"]
+
+        def try_openai_compat():
+            ep = f"{base_url}/chat/completions"
+            p = {
+                "model": model_name.strip(),
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.7,
+                "stop": _stop,
+            }
+            # seed: 0 = omit (random), non-zero = pass for reproducibility
+            if seed != 0:
+                p["seed"] = seed
+            # thinking mode control — OpenRouter only; Ollama/Kobold/NanoGPT reject this param
+            if backend == "OpenRouter":
+                p["thinking"] = {"type": "enabled", "budget_tokens": 2048} if thinking_mode else {"type": "disabled"}
+            print(f"[PromptEnhancer] Trying OpenAI-compat at {ep} (backend={backend} thinking={thinking_mode} seed={seed})", flush=True)
+            req_data = _json.dumps(p).encode("utf-8")
+            req = _urlreq.Request(ep, data=req_data, headers=headers, method="POST")
+            with _urlreq.urlopen(req, timeout=120) as resp:
+                result = _json.loads(resp.read().decode("utf-8"))
+            return _msg_text(result["choices"][0]["message"])
+
+        def try_ollama_native():
+            ep = f"{ollama_base}/api/chat"
+            opts = {"temperature": 0.7, "num_predict": max_tokens, "stop": _stop}
+            if seed != 0:
+                opts["seed"] = seed
+            p = {
+                "model": model_name.strip(),
+                "messages": messages,
+                "stream": False,
+                "options": opts,
+            }
+            print(f"[PromptEnhancer] Trying Ollama native at {ep} (seed={seed})", flush=True)
+            req_data = _json.dumps(p).encode("utf-8")
+            req = _urlreq.Request(ep, data=req_data, headers={"Content-Type": "application/json"}, method="POST")
+            with _urlreq.urlopen(req, timeout=120) as resp:
+                result = _json.loads(resp.read().decode("utf-8"))
+            return _msg_text(result.get("message"))
+
+        def strip_thinking(text: str) -> str:
+            """Strip thinking/reasoning blocks that models emit before the real answer.
+            Handles XML tags AND the markdown-scaffold style some reasoning models use
+            (e.g. '**Image Analysis:**' ... '**Drafting the prompt:**' <answer>)."""
+            import re as _re2
+            # XML-style thinking tags (Qwen3, DeepSeek, some OpenRouter models)
+            text = _re2.sub(r"<think>.*?</think>", "", text, flags=_re2.DOTALL)
+            text = _re2.sub(r"<thinking>.*?</thinking>", "", text, flags=_re2.DOTALL)
+            text = _re2.sub(r"<reasoning>.*?</reasoning>", "", text, flags=_re2.DOTALL)
+            text = _re2.sub(r"<reflection>.*?</reflection>", "", text, flags=_re2.DOTALL)
+            text = _re2.sub(r"<thought>.*?</thought>", "", text, flags=_re2.DOTALL)
+            # "Thinking:" or "Reasoning:" header blocks followed by blank line
+            text = _re2.sub(r"(?i)^(thinking|reasoning|reflection|thought process):.*?\n\n", "", text, flags=_re2.DOTALL)
+            # Strip any remaining unclosed opening tags
+            text = _re2.sub(r"<(think|thinking|reasoning|reflection)[^>]*>.*$", "", text, flags=_re2.DOTALL)
+
+            # Markdown-scaffold reasoning: if a final-answer marker is present, keep only
+            # what follows the LAST one. Markers are reasoning-scaffold phrases that
+            # essentially never appear inside a real generation prompt.
+            markers = [
+                r"drafting the (?:final )?(?:prompt|dialogue)",
+                r"(?:let'?s |now )?refin(?:e|ing) the (?:prompt|structure)",
+                r"final prompt",
+                r"final answer",
+                r"here(?:'s| is) the (?:final |enhanced )?prompt",
+                r"enhanced prompt",
+                r"the prompt is",
+            ]
+            marker_re = _re2.compile(r"(?im)^\s*[*_#> \t]*(?:" + "|".join(markers) + r")\s*[:*_]*\s*$\n?", _re2.MULTILINE)
+            last = None
+            for m in marker_re.finditer(text):
+                last = m
+            if last is not None:
+                candidate = text[last.end():].strip()
+                if candidate:  # never strip everything to nothing
+                    text = candidate
+
+            # Trailing self-reflection: some models emit a clean answer, then critique
+            # it and start re-drafting (often truncated). Keep everything BEFORE the
+            # first reflection cue. Newline-anchored so it can't fire inside a paragraph.
+            trailing = _re2.search(
+                r"(?im)\n\s*(?:refining\b|revised\b|revised prompt|drafting\b|"
+                r"on second thought|let me (?:know|refine|revise)|wait,)",
+                text,
+            )
+            if trailing:
+                head = text[:trailing.start()].strip()
+                if head:
+                    text = head
+
+            # Leading reasoning preamble: some runs open with task commentary
+            # ("The user wants…", "I need to…", "Let me…") before the actual prompt.
+            # Drop leading lines that look like commentary, stop at the first real line.
+            _cue = _re2.compile(
+                r"(?i)^(the user\b|the image\b|i need\b|i'?ll\b|i will\b|i'?m going\b|"
+                r"let me\b|let'?s\b|okay\b|ok[, ]|first,|looking at\b|"
+                r"to (?:write|create|craft|build)\b|here'?s my\b|based on the\b|"
+                r"alright\b|sure[,!]|i'?ve analyzed\b)"
+            )
+            _lines = text.split("\n")
+            while len(_lines) > 1 and (not _lines[0].strip() or _cue.match(_lines[0].strip())):
+                _lines.pop(0)
+            text = "\n".join(_lines).strip()
+
+            # Clean leftover wrapping artifacts (surrounding quotes / stray bold markers)
+            text = text.strip().strip("`").strip()
+            text = _re2.sub(r'^["\u201c\u201d\']+|["\u201c\u201d\']+$', "", text).strip()
+            return text.strip()
+
+        try:
+            enhanced = strip_thinking(try_openai_compat())
+            if not enhanced:
+                print(f"[PromptEnhancer] WARNING: LLM returned no usable text (content was empty/null). "
+                      f"If this is a reasoning model, it likely spent the whole max_tokens budget "
+                      f"({max_tokens}) on thinking — raise max_tokens or use a non-thinking model. "
+                      f"Returning original prompt.", flush=True)
+                return (prompt,)
+            print(f"[PromptEnhancer] Enhanced (OpenAI compat): {enhanced[:120]!r}", flush=True)
+            return (enhanced,)
+        except _urlerr.HTTPError as e:
+            if e.code == 404 and backend == "Ollama":
+                print(f"[PromptEnhancer] OpenAI compat returned 404, trying Ollama native API...", flush=True)
+                try:
+                    enhanced = strip_thinking(try_ollama_native())
+                    if not enhanced:
+                        print(f"[PromptEnhancer] WARNING: Ollama native also returned empty", flush=True)
+                        return (prompt,)
+                    print(f"[PromptEnhancer] Enhanced (Ollama native): {enhanced[:120]!r}", flush=True)
+                    return (enhanced,)
+                except Exception as e2:
+                    print(f"[PromptEnhancer] Ollama native also failed: {e2}", flush=True)
+                    return (prompt,)
+            print(f"[PromptEnhancer] ERROR: {e} — returning original prompt", flush=True)
+            return (prompt,)
+        except Exception as e:
+            print(f"[PromptEnhancer] ERROR: {e} — returning original prompt", flush=True)
+            return (prompt,)
+
+
+@routes.get("/prompt_enhancer/presets")
+async def prompt_enhancer_presets(request):
+    return web.json_response({"presets": PROMPT_ENHANCER_PRESETS, "default_urls": PROMPT_ENHANCER_DEFAULT_URLS})
+
+
+@routes.post("/prompt_enhancer/models")
+async def prompt_enhancer_models(request):
+    """Fetch available models from a backend's /models endpoint."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    api_url = str(body.get("api_url", "")).rstrip("/")
+    api_key = str(body.get("api_key", "")).strip()
+    if not api_url:
+        return web.json_response({"ok": False, "error": "No api_url provided"}, status=400)
+
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    import json as _json
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    def parse_models(data):
+        if "models" in data:
+            return [m.get("name") or m.get("id", "") for m in data["models"] if m.get("name") or m.get("id")]
+        elif "data" in data:
+            return [m.get("id", "") for m in data["data"] if m.get("id")]
+        return []
+
+    # Try OpenAI-compat /models first
+    try:
+        endpoint = f"{api_url}/models"
+        req = _urlreq.Request(endpoint, headers=headers, method="GET")
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        models = sorted([m for m in parse_models(data) if m])
+        if models:
+            return web.json_response({"ok": True, "models": models})
+    except _urlerr.HTTPError as e:
+        if e.code != 404:
+            return web.json_response({"ok": False, "error": f"HTTP {e.code}: {e.reason}"}, status=500)
+    except Exception as e:
+        pass  # Fall through to Ollama native
+
+    # Try Ollama native /api/tags (for older Ollama versions without /v1)
+    try:
+        ollama_base = api_url
+        if ollama_base.endswith("/v1"):
+            ollama_base = ollama_base[:-3]
+        tags_endpoint = f"{ollama_base}/api/tags"
+        req = _urlreq.Request(tags_endpoint, headers={"Content-Type": "application/json"}, method="GET")
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        models = sorted([m.get("name", "") for m in data.get("models", []) if m.get("name")])
+        if models:
+            return web.json_response({"ok": True, "models": models})
+        return web.json_response({"ok": True, "models": models})
+
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
 NODE_CLASS_MAPPINGS = {
     "WorkflowGallery": WorkflowGallery,
     "PromptLibrary": PromptLibrary,
+    "PromptEnhancer": PromptEnhancer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WorkflowGallery": "Workflow Gallery",
     "PromptLibrary": "Prompt Library",
+    "PromptEnhancer": "Prompt Enhancer",
 }

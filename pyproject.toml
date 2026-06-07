@@ -1,7 +1,7 @@
 [project]
 name = "workflow-gallery"
 # Current release metadata
-version = "0.1.20"
+version = "0.1.21"
 description = "A ComfyUI custom node that collects generated images into a scrollable in-node gallery."
 readme = "README.md"
 requires-python = ">=3.10"
