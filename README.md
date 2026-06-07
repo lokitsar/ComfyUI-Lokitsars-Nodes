@@ -1,4 +1,4 @@
-# ComfyUI-Workflow-Gallery
+# Lokitsar's Nodes
 
 A suite of ComfyUI custom nodes for reviewing, comparing, exporting, and reusing generated images and prompts — all without leaving ComfyUI.
 
@@ -171,14 +171,14 @@ Paired with a local, uncensored model, the enhancer describes content faithfully
 Search for **Workflow Gallery** in ComfyUI Manager and install directly.
 
 ### Option 2 — Manual
-1. Copy this folder into `ComfyUI/custom_nodes/`
+1. Copy this folder into `ComfyUI/custom_nodes/` (folder name `ComfyUI-Lokitsars-Nodes`)
 2. Restart ComfyUI
 3. Find **Workflow Gallery** under `image/ui` and **Prompt Library** under `utils/prompt`
 
 ```text
 ComfyUI/
 └── custom_nodes/
-    └── ComfyUI-Workflow-Gallery/
+    └── ComfyUI-Lokitsars-Nodes/
         ├── nodes.py
         ├── danbooru_tags.txt
         ├── js/

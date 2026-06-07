@@ -1,24 +1,24 @@
 [project]
-name = "workflow-gallery"
+name = "lokitsars-nodes"
 # Current release metadata
 version = "0.1.21"
-description = "A ComfyUI custom node that collects generated images into a scrollable in-node gallery."
+description = "A suite of ComfyUI custom nodes: an in-node image gallery, a prompt library, and an LLM prompt enhancer."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "lokitsar" }
 ]
-keywords = ["comfyui", "gallery", "images", "workflow", "thumbnails"]
+keywords = ["comfyui", "gallery", "prompt", "prompt-library", "prompt-enhancer", "llm", "images", "workflow"]
 dependencies = [
     "Pillow>=10.0.0",
     "numpy>=1.24.0"
 ]
 
 [project.urls]
-Repository = "https://github.com/lokitsar/ComfyUI-Workflow-Gallery"
+Repository = "https://github.com/lokitsar/ComfyUI-Lokitsars-Nodes"
 
 [tool.comfy]
 PublisherId = "lokitsar"
-DisplayName = "Workflow Gallery"
-Icon = "🖼️"
+DisplayName = "Lokitsar's Nodes"
+Icon = "🧰"
