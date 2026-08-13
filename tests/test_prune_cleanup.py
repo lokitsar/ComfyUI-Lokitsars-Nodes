@@ -1,16 +1,34 @@
 import asyncio
+import contextlib
+import shutil
 import sys
 import tempfile
 import types
 import unittest
-
-import numpy as np
-
-import numpy as np
+import uuid
 
 import numpy as np
 
 from pathlib import Path
+
+
+TEST_TMPDIR = Path(tempfile.gettempdir()) / f"lokitsars-nodes-tests-{uuid.uuid4().hex}"
+TEST_TMPDIR.mkdir(exist_ok=True)
+tempfile.tempdir = str(TEST_TMPDIR)
+
+
+def tearDownModule():
+    shutil.rmtree(TEST_TMPDIR, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _temp_dir():
+    path = TEST_TMPDIR / f"case-{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class _FakeRoutes:
@@ -61,6 +79,10 @@ def _load_nodes_module():
     fake_server.PromptServer = _FakePromptServerClass
     sys.modules["server"] = fake_server
 
+    fake_folder_paths = types.ModuleType("folder_paths")
+    fake_folder_paths.get_output_directory = lambda: tempfile.gettempdir()
+    sys.modules["folder_paths"] = fake_folder_paths
+
     import importlib
 
     if "nodes" in sys.modules:
@@ -72,7 +94,7 @@ class TestPruneCleanup(unittest.TestCase):
     def test_prune_removes_full_and_thumb_files_and_index(self):
         nodes = _load_nodes_module()
 
-        with tempfile.TemporaryDirectory() as td:
+        with _temp_dir() as td:
             temp_dir = Path(td)
             full_old = temp_dir / "old.png"
             thumb_old = temp_dir / "old.webp"
@@ -112,7 +134,7 @@ class TestPruneCleanup(unittest.TestCase):
     def test_clear_removes_entries_from_index(self):
         nodes = _load_nodes_module()
 
-        with tempfile.TemporaryDirectory() as td:
+        with _temp_dir() as td:
             temp_dir = Path(td)
             full_path = temp_dir / "one.png"
             thumb_path = temp_dir / "one.webp"
@@ -140,7 +162,7 @@ class TestPruneCleanup(unittest.TestCase):
     def test_collect_save_to_disk_true_writes_to_selected_output_dir(self):
         nodes = _load_nodes_module()
 
-        with tempfile.TemporaryDirectory() as td:
+        with _temp_dir() as td:
             output_dir = Path(td) / "out"
             image = _FakeTensor(np.ones((8, 8, 3), dtype=np.float32))
 
@@ -156,7 +178,7 @@ class TestPruneCleanup(unittest.TestCase):
     def test_collect_save_to_disk_false_writes_to_cache_dir(self):
         nodes = _load_nodes_module()
 
-        with tempfile.TemporaryDirectory() as td:
+        with _temp_dir() as td:
             output_dir = Path(td) / "out"
             image = _FakeTensor(np.ones((8, 8, 3), dtype=np.float32))
 
@@ -171,6 +193,63 @@ class TestPruneCleanup(unittest.TestCase):
             self.assertEqual(full_path.parent.name, "unsaved_cache")
             self.assertTrue(str(full_path).startswith(str(nodes.CACHE_BASE_DIR.resolve())))
             self.assertEqual(nodes.GALLERY_STATE["node-save-false"]["save_to_disk"], False)
+
+    def test_yaml_wildcard_nested_key_loads_and_caches_by_file_signature(self):
+        nodes = _load_nodes_module()
+
+        with _temp_dir() as td:
+            path = Path(td) / "colors.yaml"
+            path.write_text("dark:\n  - charcoal\n  - navy\nlight:\n  - ivory\n", encoding="utf-8")
+
+            first = nodes._read_wildcard_lines_yaml(path, ["dark"])
+            self.assertEqual(first, ["charcoal", "navy"])
+            self.assertIn(f"{path}|dark", nodes._YAML_LINES_CACHE)
+
+            path.write_text("dark:\n  - black\n", encoding="utf-8")
+            second = nodes._read_wildcard_lines_yaml(path, ["dark"])
+            self.assertEqual(second, ["black"])
+
+    def test_yaml_wildcard_reader_does_not_use_executor_timeout(self):
+        nodes = _load_nodes_module()
+
+        with _temp_dir() as td:
+            path = Path(td) / "simple.yaml"
+            path.write_text("- one\n- two\n", encoding="utf-8")
+
+            self.assertEqual(nodes._read_wildcard_lines_yaml(path, []), ["one", "two"])
+            self.assertNotIn("concurrent.futures", nodes._read_wildcard_lines_yaml.__code__.co_names)
+
+    def test_yaml_wildcard_prefix_lookup_avoids_recursive_scan(self):
+        nodes = _load_nodes_module()
+
+        with _temp_dir() as td:
+            root = Path(td)
+            path = root / "colors.yaml"
+            path.write_text("dark:\n  - charcoal\n", encoding="utf-8")
+
+            original_rglob = Path.rglob
+            try:
+                Path.rglob = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rglob should not be used"))
+                found, key_parts = nodes._find_wildcard_file_in_dirs("colors/dark", [root])
+                self.assertEqual(found, path)
+                self.assertEqual(key_parts, ["dark"])
+            finally:
+                Path.rglob = original_rglob
+
+    def test_missing_wildcard_lookup_avoids_recursive_scan(self):
+        nodes = _load_nodes_module()
+
+        with _temp_dir() as td:
+            root = Path(td)
+
+            original_rglob = Path.rglob
+            try:
+                Path.rglob = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rglob should not be used"))
+                found, key_parts = nodes._find_wildcard_file_in_dirs("missing/wildcard", [root])
+                self.assertIsNone(found)
+                self.assertEqual(key_parts, [])
+            finally:
+                Path.rglob = original_rglob
 
 
 

@@ -1,0 +1,199 @@
+# Danbooru Tags Reference for Illustrious XL / SDXL Anime
+# ─────────────────────────────────────────────────────────
+# This file is injected into the Illustrious system prompt when using the Prompt Enhancer.
+# Edit freely — remove tags you don't want, add tags you use often.
+# Lines starting with # are comments and are ignored.
+# Only use tags that exist on Danbooru with 100+ images or they will be ignored by the model.
+# Tags must be lowercase.
+
+[QUALITY]
+masterpiece, best quality, absurdres, newest, very aesthetic, highres, highly detailed, intricate details, sharp focus, beautiful detailed, fine detail
+
+[SUBJECT COUNT]
+1girl, 1boy, 2girls, 2boys, 1other, solo, duo, group
+
+[SHOT FRAMING]
+full body, upper body, portrait, close-up, cowboy shot, bust, face, from above, from below, from side, from behind, dutch angle, wide shot, dynamic angle
+
+[EXPRESSION]
+smile, grin, open mouth, closed mouth, surprised, serious, angry, sad, crying, blush, frown, smirk, nervous, shy, embarrassed, wink, sleepy, determined, calm, happy, excited, scared, disgusted, confused
+
+[POSE]
+standing, sitting, lying, kneeling, running, walking, jumping, flying, floating, crouching, leaning, stretching, looking at viewer, looking away, looking back, looking up, looking down, arms up, arms crossed, hand on hip, hand on face, reaching out, dynamic pose, action pose, relaxed pose
+
+[HAIR]
+short hair, long hair, medium hair, very long hair, twin tails, ponytail, braid, braids, side ponytail, messy hair, wavy hair, curly hair, straight hair, hair bun, bangs, side bangs, hair over eyes, hair between eyes, ahoge, hair ribbon, hair ornament, hairclip, hairpin
+
+[EYES]
+blue eyes, red eyes, green eyes, purple eyes, yellow eyes, brown eyes, grey eyes, pink eyes, heterochromia, glowing eyes, half-closed eyes, closed eyes, wide eyes, empty eyes, sparkling eyes
+
+[CLOTHING - GENERAL]
+school uniform, casual, formal, kimono, yukata, dress, skirt, pants, shorts, coat, jacket, hoodie, sweater, shirt, blouse, vest, tie, bow, ribbon, gloves, boots, shoes, sneakers, heels, stockings, thighhighs, socks, hat, cap, hood, scarf, cape, cloak, armor, swimsuit, bikini
+
+[CLOTHING - STYLE]
+japanese school uniform, sailor uniform, military uniform, maid uniform, shrine maiden, witch, fantasy, sci-fi, gothic, lolita, gothic lolita, punk, cyberpunk, streetwear, traditional japanese, historical
+
+[SETTING - OUTDOOR]
+outdoors, nature, forest, trees, grass, flowers, park, garden, street, city, cityscape, rooftop, beach, ocean, sea, sky, clouds, mountains, snow, rain, sunset, sunrise, night sky, starry sky, moonlight, sunlight, fog, mist
+
+[SETTING - INDOOR]
+indoors, bedroom, living room, kitchen, classroom, library, office, hallway, bathroom, shop, cafe, restaurant, bar, laboratory, dungeon, castle interior, temple interior, church
+
+[BACKGROUND]
+simple background, white background, black background, gradient background, bokeh background, detailed background, blurry background, out of focus background, nature background, urban background
+
+[LIGHTING]
+natural lighting, soft lighting, dramatic lighting, backlighting, rim lighting, sunlight, moonlight, candlelight, neon lights, studio lighting, volumetric lighting, god rays, lens flare, glowing, shadow, dark, bright, high contrast, low contrast, warm lighting, cool lighting, golden hour
+
+[BEFORE SEX]
+presenting, take your pick
+
+[STIMULATION]
+footjob, double footjob, implied footjob, cooperative footjob, shoejob, bootjob, feet, licking foot, foot worship, smelling feet, frottage (dry humping), armpit sex, pussyjob, backjob, buttjob, cooperative pussyjob, kneepit sex, paizuri (tittyfuck), autopaizuri (done on oneself), cooperative paizuri, handsfree paizuri, naizuri (flatchested paizuri), paizuri over clothes, paizuri on lap, paizuri under clothes, pecjob (done with a male's pectorals), perpendicular paizuri, stealth paizuri, straddling paizuri, thigh sex, glansjob, cloth glansjob, groping, grabbing another's ass, grabbing another's breast, guided breast grab, pectoral grab, guided pectoral grab, nipple tweak, crotch grab, guided crotch grab, grabbing own breast, torso grab, hairjob, handjob, caressing testicles, double handjob, cooperative handjob, nursing handjob, cuddling handjob, reverse nursing handjob, reach-around, two-handed handjob, masturbation, clothed masturbation, crotch rub, building sex, pillow humping, teddy bear sex, table humping, female masturbation, futanari masturbation, implied masturbation, male masturbation, mutual masturbation, stealth masturbation, tail masturbation, tail, tail insertion, tail masturbation, tailjob, oral, anilingus, rusty trombone, breast sucking, cunnilingus, autocunnilingus, implied cunnilingus, fellatio, autofellatio, cum swap (snowballing), deepthroat, implied fellatio, irrumatio, cooperative fellatio, multiple penis fellatio, hug and suck, licking testicle, sitting on face (facesitting), testicle sucking
+
+[GROUP SEX]
+group sex, bisexual, bisexual female, bisexual male, oral sandwich, daisy chain, gangbang, double penetration, triple penetration, love train, cooperative fellatio, cooperative footjob, cooperative breast smother, orgy, reverse spitroast, spitroast, teamwork, threesome, MMF threesome, FFM threesome, MMM threesome, FFF threesome
+
+[PENETRATION AND INSERTION]
+animal insertion, cervical penetration, covered penetration, deep penetration, food insertion, inflation, cum inflation, big belly, enema, large insertion, stomach bulge, male penetrated, multiple insertions, nipple penetration, nosejob, object insertion, vaginal object insertion, anal object insertion, urethral insertion, sounding, fingering, anal fingering, prostate milking, fingering through clothes, fingering through panties, implied fingering, fisting, anal fisting, self fisting, sex, after sex, after anal, after buttjob, after fellatio, after fingering, after frottage, after insertion, after masturbation, after oral, after paizuri, after rape, after urethral, after vaginal, afterglow, clothed after sex, anal, double anal, imminent anal, pegging, triple anal, clothed sex, guided penetration, happy sex, imminent penetration, implied sex, navel sex, rough sex, sex from behind, skull fucking, ear sex, penis in eye, tentacle sex, underwater sex, vaginal, after vaginal, double vaginal, imminent vaginal, triple vaginal
+
+[SAME SEX ACTS]
+yuri (female-female), implied yuri, tribadism (scissoring)
+
+[AGE PLAY]
+diaper, adult baby, loli / shota, toddlercon, mature female
+
+[ANIMAL PLAY]
+leash pull, pet play, human dog, pony play
+
+[BODY TYPES]
+giant / giantess, miniboy / minigirl, muscular, muscular female, plump / curvy, fat, skinny
+
+[BREASTS]
+breast expansion, breast smother, cooperative breast smother, lactation, breastfeeding, lactation through clothes, milking machine, breast pump
+
+[BONDAGE AND DISCIPLINE]
+bdsm, asphyxiation, strangling, bondage, bound together, breast bondage, human dog, predicament bondage, public bondage, self bondage, shibari, shibari over clothes, shibari under clothes, spreader bar, suspension, dominator (bdsm), femdom (female domination), assertive female (lighter form; female taking lead), clothed female nude male, dominatrix, sitting on face (facesitting), humiliation, body writing, masochism, neglect play, public use, tally, rope walking, sadism, slave, spanked, torture, clitoris torture, nipple torture, nipple clamps, nipple pull, ball busting, tickle torture, temperature play, wax play, ice play
+
+[CUM PLAY]
+cum, bukkake, cumdump, cum bath, cumdrip, cum pool, cum inflation, cum in ass, cum in clothes, cum in cup, cum in mouth, cum in throat, cum on tongue, cum in pussy, cum in urethra, cum on body, cum on armpits, cum on ass, cum on back, cum on breasts, cum on chest, cum on feet, cum on fingers, cum on hair, cum on pectorals, cum on pussy, cum on stomach, cum in navel, cum on clothes, cum on eyewear, cum on food, ejaculation, ejaculating while penetrated, pull out, facial, autofacial, felching, gokkun
+
+[EXIHIBITION, PUBLICITY, STEALTH AND VOYERISM]
+exhibitionism, clothed sex, public indecency, public nudity, zenra, public vibrator, stealth bondage, stealth masturbation, stealth paizuri, stealth sex, cheating, netorare, reverse netorare, prostitution, public use, voyeurism, caught, peeking, walk-in
+
+[FACIAL EXPRESSIONS]
+:>= (blowjob face), fucked silly, ahegao, torogao, naughty face
+
+[INCEST]
+incest, twincest
+
+[RAPE]
+rape, assisted rape, femdom rape (female-on-male, also known as "reverse rape"), imminent rape, molestation, chikan, compensated molestation
+
+[SMOTHER]
+smother, asphyxiation, breast smother, sitting on face (facesitting)
+
+[VIEWS]
+cross-section, internal cumshot, x-ray
+
+[ROLES]
+power bottom (sub is the dominant party)
+
+[MISCELLANEOUS FETISHES]
+anatomy, conjoined, extra arms, extra breasts, extra penises, bestiality, knotting, condom, used condom on penis, condom left inside, used condom, defloration, dirty talk, eating and drinking from body, nantaimori, nyotaimori, wakamezake, bust cup, female ejaculation, pussy juice, glory hole, glory wall, human furniture, forniphilia, human toilet, mating (animal), mecha on girl, pregnant, giving birth, impregnation, unbirthing, selfcest
+
+[SMELLING]
+smelling feet, smelling clothes, smelling underwear, smelling pantyhose
+
+[TENTACLES]
+consensual tentacles, mechanical tentacles, penis tentacle, pussy tentacle, tentacle clothes, tentacle gagged, tentaclejob, tentacle pit, kankaku shadan, tentacle sex, tentacles in thighhighs, tentacles under clothes, tentacles on male, too many tentacles, vore
+
+[ATMOSPHERE]
+fantasy, sci-fi, cyberpunk, steampunk, post-apocalyptic, horror, romantic, peaceful, action, mysterious, dreamy, ethereal, dark, bright, colorful, monochrome, vintage, retro, futuristic
+
+[COLOR]
+colorful, vibrant colors, pastel colors, dark colors, monochrome, black and white, warm colors, cool colors, red, blue, green, yellow, purple, pink, orange, white, black, gold, silver
+
+[ART STYLE]
+anime, manga, digital art, watercolor, oil painting, sketch, line art, flat color, cel shading, realistic, semi-realistic, chibi, pixel art, 3d render
+
+[EFFECTS]
+motion blur, depth of field, bokeh, lens flare, chromatic aberration, film grain, vignette, glitch, particles, sparkles, petals, leaves, feathers, smoke, fire, water, magic, aura, glow
+
+[BREAST SIZES]
+breasts, flat chest, small breasts, medium breasts, large breasts, huge breasts, gigantic breasts
+
+[BREAST SITUATION]
+a flat chest is a status symbol, breast conscious, breast contest, breast envy, breast awe, flat envy, breast expansion, breast punch, breast reduction, breast padding, breast size switch, bust chart, bust measuring, compressed breasts, flying button, looking at breasts, convenient breasts, inconvenient breasts, oversized breast cup, slapping breasts, slapping with breasts, undersized breast cup, weighing breasts
+
+[WHOLE BREAST VISIBLE]
+breast slip, breastless clothes, breasts out, impossible shirt, one breast out
+
+[BREAST DESCRIPTION]
+asymmetrical breasts, bouncing breasts, breasts apart, floating breasts, hanging breasts, perky breasts, sagging breasts, unaligned breasts, veiny breasts, pointy breasts
+
+[CLOTHES FOR BREASTS]
+bandeau, bikini, bikini bottom only, cupless bikini, bra, cupless bra, hand in bra, no bra, nursing bra, shelf bra, belt bra, breastless clothes, single breast curtain, bustier, center opening, chest binder, Cinderella bust, cleavage cutout, corset, framed breasts, nipple cutout, nippleless clothes, panties on breasts, plunging neckline, rei no himo, sarashi, taut shirt, underbust
+
+[PENIS ON BREASTS]
+paizuri (penis between breasts), autopaizuri, cooperative paizuri, handsfree paizuri, paizuri on lap, paizuri over clothes, paizuri under clothes, perpendicular paizuri, reverse paizuri, straddling paizuri, naizuri, cooperative naizuri, penis to breast, penis under breasts, nipple penetration
+
+[HEAD ON BREASTS]
+breast smother, breast pillow, breasts on head, face to breasts, face to pecs, head between breasts, face between breasts
+
+[MOUTH ON BREASTS]
+breast biting, breastfeeding, breast sucking, sucking own breasts, mutual breast sucking, nursing handjob, biting nipple, licking nipple
+
+[HANDS ON BREASTS]
+breast hold, grabbing another's breast, flat chest grab, guided breast grab, breast lift, breast press, breast pull, breast punch, slapping breasts, breasts squeezed together, breast suppress, groping, arm between breasts, hand in bra, nipple flick, nipple press, nipple push, nipple pull, nipple rub, nipple tweak, poking another's breast, poking own breast
+
+[FEET ON BREASTS]
+foot on breast
+
+[TOYS ON BREASTS]
+nipple clamps, nipple leash, nipple piercing, areola piercing, nipple bar, nipple bells, nipple chain, nipple lock, nipple rings, nipple stretcher, nipple tag, nipple plug, nipple sleeves, nipple torture, tied nipples, nipple ribbon, vibrator on nipple
+
+[DOCKING]
+asymmetrical docking, symmetrical docking, nipple-to-nipple
+
+[MISC BREASTS]
+alternate breast size, alternate breast size (larger), alternate breast size (smaller), between breasts, card between breasts, arm between breasts, head between breasts, necktie between breasts, person between breasts, breast bondage, tied breast, breast mousepad, breast implants, breast rest, carried breast rest, breasts on table, breasts on head, slapping with breasts, breast crush, breasts on glass, bust cup, covering breasts, cum on breasts, dovefucking, extra breasts, food on breasts, chocolate on breasts, lactation, breast milk in container, breast pump, forced lactation, lactating into container, lactation through clothes, milking machine, projectile lactation, male with breasts, mole on breast, nipple injection, object on breast, bubble tea challenge, headphones on breasts, tawawa challenge, object on pectorals, oppai challenge
+
+[SEX STIMULATION]
+footjob, double footjob, implied footjob, cooperative footjob, shoejob, bootjob, feet, licking foot, foot worship, smelling feet, frottage (dry humping), armpit sex, pussyjob, backjob, buttjob, cooperative pussyjob, kneepit sex, paizuri (tittyfuck), autopaizuri (done on oneself), cooperative paizuri, handsfree paizuri, naizuri (flatchested paizuri), paizuri over clothes, paizuri on lap, paizuri under clothes, pecjob (done with a male's pectorals), perpendicular paizuri, stealth paizuri, straddling paizuri, thigh sex, glansjob, cloth glansjob, groping, grabbing another's ass, grabbing another's breast, guided breast grab, pectoral grab, guided pectoral grab, nipple tweak, crotch grab, guided crotch grab, grabbing own breast, torso grab, hairjob, handjob, caressing testicles, double handjob, cooperative handjob, nursing handjob, cuddling handjob, reverse nursing handjob, reach-around, two-handed handjob, masturbation, clothed masturbation, crotch rub, building sex, pillow humping, teddy bear sex, table humping, female masturbation, futanari masturbation, implied masturbation, male masturbation, mutual masturbation, stealth masturbation, tail masturbation, tail, tail insertion, tail masturbation, tailjob, oral, anilingus, rusty trombone, breast sucking, cunnilingus, autocunnilingus, implied cunnilingus, fellatio, autofellatio, cum swap (snowballing), deepthroat, implied fellatio, irrumatio, cooperative fellatio, multiple penis fellatio, hug and suck, licking testicle, sitting on face (facesitting), testicle sucking
+
+[EXPOSED CLOTHING]
+clothing aside, clothes down, open clothes, revealing clothes, see through clothes, unbuttoned, undressing, unfastened, untied, untying, unzipped, unzipping
+
+[MISC PARTIAL CLOTHING]
+bikini bottom aside, bikini pull, cape lift, lifting covers, bikini, open, bra, open, kimono, open, robe slip, strap lift, strap pull, strap slip, swimsuit aside, one-piece swimsuit pull, towel, open, towel slip, male underwear pull
+
+[EXPOSED SHOULDER OR ARMS]
+armpits, armpit cutout, bare arms, arm cutout, bare shoulders, off shoulder, shoulder cutout, sleeves rolled up, sleeveless, low-cut armhole, sleeves pushed up, sleeves rolled up, exposed head or neck, hood down
+
+[EXPOSED CHEST]
+center opening, coat, open, open collar, dress pull, hoodie, open, jacket, open, leotard pull, kimono down, kimono pull, pajamas pull, open robe, shirt aside, topless male, shirt, no, shirt, open, shirt lift, shirt pull, shirt slip, sweater lift, top pull, open vest
+
+[EXPOSED BREASTS]
+breastless clothes, breast out, one, slip, breasts out, bra lift, bra, no, bra pull, topless female
+
+[EXPOSED BREAST]
+backboob, cleavage, cleavage cutout, sideboob, underboob, underboob cutout
+
+[EXPOSED NIPPLES]
+areola slip, nipple slip, nippleless clothes, nipples (visible)
+
+[EXPOSED TORSO]
+back cutout, backless outfit, bare back, frontless outfit, midriff, navel cutout, side cutout, sideless outfit, stomach cutout
+
+[FOOT OR LEG FOCUS]
+barefoot, bare legs, dress lift, hip vent, leg cutout, thigh cutout, side slit, pants, no, shoe pull, sock pull, zettai ryouiki
+
+[FOCUS ON ASS OR CROTCH]
+ass cutout, bottomless, buruma pull, buruma aside, clitoris slip, clothing aside, crotch cutout, dress aside, leotard aside, hakama pull, kimono lift, yukata lift, panties, no, panties aside, pants pull, open pants, pants pull, panty lift, panty pull, penis peek, pussy peek, pantyhose pull, shorts aside, shorts, open, shorts pull, skirt around one leg, skirt around ankles, open skirt, skirt pull, skirt lift, swimsuit aside, bikini bottom aside
+
+[TOUCHING CLOTHES]
+adjusting clothes, clothes grab, apron grab, collar grab, necktie grab, grabbing another's skirt, collar tug, dress tug, shirt tug, skirt tug, wringing clothes
+
+[MISC/MORE]
+nude modeling, tan, tanlines, pants rolled up, skirt rolled up, clothes on and off

@@ -14,6 +14,12 @@ from aiohttp import web
 from server import PromptServer
 import folder_paths
 
+try:
+    from .training_helpers import DatasetSidecarWriter, scale_for_provider
+except ImportError:
+    # The local unit tests import nodes.py as a top-level module.
+    from training_helpers import DatasetSidecarWriter, scale_for_provider
+
 
 GALLERY_STATE: Dict[str, Dict[str, Any]] = {}
 ENTRY_INDEX: Dict[str, Dict[str, Any]] = {}
@@ -38,6 +44,10 @@ SESSION_DIR.mkdir(parents=True, exist_ok=True)
 PROMPT_LIBRARY_FILE = CACHE_BASE_DIR / "prompt_library.json"
 PROMPT_LIBRARY_LOCK = threading.Lock()
 PROMPT_LIBRARY_OUTPUTS: Dict[str, str] = {}
+# Runtime outputs of PromptEnhancer nodes, keyed by node_id. The enhanced text
+# only exists at runtime — it is never in the prompt graph — so the gallery's
+# prompt resolver needs this to show the ACTUAL final prompt fed downstream.
+PROMPT_ENHANCER_OUTPUTS: Dict[str, str] = {}
 
 # ── Wildcard expansion ────────────────────────────────────────────────────────
 import random
@@ -92,111 +102,164 @@ def _read_wildcard_lines_txt(path: Path) -> List[str]:
 
 
 # Cache parsed YAML files so we only pay the parse cost once per session.
-_YAML_CACHE: Dict[str, List[str]] = {}
+_YAML_DATA_CACHE: Dict[str, tuple[tuple[int, int], Any]] = {}
+_YAML_LINES_CACHE: Dict[str, tuple[tuple[int, int], List[str]]] = {}
+_WILDCARD_LOOKUP_CACHE: Dict[tuple[str, tuple[str, ...]], tuple[Path | None, List[str]]] = {}
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return (0, 0)
+
+
+def _load_wildcard_yaml(path: Path) -> Any:
+    """Load a YAML wildcard file once, invalidating the cache when it changes."""
+    cache_key = str(path)
+    signature = _file_signature(path)
+    cached = _YAML_DATA_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    try:
+        import yaml  # type: ignore
+        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
+    except ImportError:
+        # PyYAML not available - minimal line parser for simple list format.
+        data = []
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                data.append(stripped[2:].strip())
+    except Exception as e:
+        print(f"[PromptLibrary] YAML parse error in {path}: {e}", flush=True)
+        data = None
+
+    _YAML_DATA_CACHE[cache_key] = (signature, data)
+    return data
 
 def _read_wildcard_lines_yaml(path: Path, name_parts: List[str]) -> List[str]:
-    """Read lines from a .yaml wildcard file with a thread timeout to prevent
-    blocking ComfyUI's main thread on large or malformed files.
-    Results are cached per file path so repeated wildcard use is fast."""
-    import concurrent.futures as _cf
+    """Read lines from a .yaml wildcard file.
 
+    Parsed YAML is cached by file timestamp/size. Avoid using a ThreadPoolExecutor
+    timeout here: if PyYAML or the filesystem stalls, executor shutdown waits for
+    the worker anyway, which freezes the Prompt Library node.
+    """
     cache_key = f"{path}|{'/'.join(name_parts)}"
-    if cache_key in _YAML_CACHE:
-        return _YAML_CACHE[cache_key]
+    signature = _file_signature(path)
+    cached = _YAML_LINES_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1]
 
-    def _parse():
-        try:
-            import yaml  # type: ignore
-            data = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
-        except ImportError:
-            # PyYAML not available — minimal line parser for simple list format
-            lines = []
-            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("- "):
-                    lines.append(stripped[2:].strip())
-            return lines
-        except Exception as e:
-            print(f"[PromptLibrary] YAML parse error in {path}: {e}", flush=True)
-            return []
+    data = _load_wildcard_yaml(path)
 
-        # Navigate nested keys: __colors/dark__ -> colors.yaml key "dark"
-        for key in name_parts:
-            if isinstance(data, dict) and key in data:
-                data = data[key]
-            elif isinstance(data, dict):
-                key_lower = key.lower()
-                match = next((v for k, v in data.items() if k.lower() == key_lower), None)
-                if match is not None:
-                    data = match
-                else:
-                    break
-
-        # Flatten to list of strings
-        if isinstance(data, list):
-            return [str(item).strip() for item in data if item]
+    # Navigate nested keys: __colors/dark__ -> colors.yaml key "dark"
+    for key in name_parts:
+        if isinstance(data, dict) and key in data:
+            data = data[key]
         elif isinstance(data, dict):
-            result = []
-            for v in data.values():
-                if isinstance(v, list):
-                    result.extend(str(i).strip() for i in v if i)
-                elif v:
-                    result.append(str(v).strip())
-            return result
-        elif isinstance(data, str):
-            return [data.strip()]
-        return []
+            key_lower = key.lower()
+            match = next((v for k, v in data.items() if str(k).lower() == key_lower), None)
+            if match is not None:
+                data = match
+            else:
+                break
 
-    # Run the parse in a thread with a 5-second timeout.
-    # If it takes longer (huge file, filesystem stall) we skip it rather than freeze.
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_parse)
-            lines = future.result(timeout=5.0)
-    except _cf.TimeoutError:
-        print(f"[PromptLibrary] YAML load timed out for {path} — skipping. "
-              f"Consider converting to .txt for faster loading.", flush=True)
-        lines = []
-    except Exception as e:
-        print(f"[PromptLibrary] YAML load failed for {path}: {e}", flush=True)
+    # Flatten to list of strings
+    if isinstance(data, list):
+        lines = [str(item).strip() for item in data if item]
+    elif isinstance(data, dict):
+        result = []
+        for v in data.values():
+            if isinstance(v, list):
+                result.extend(str(i).strip() for i in v if i)
+            elif v:
+                result.append(str(v).strip())
+        lines = result
+    elif isinstance(data, str):
+        lines = [data.strip()]
+    else:
         lines = []
 
-    _YAML_CACHE[cache_key] = lines
+    _YAML_LINES_CACHE[cache_key] = (signature, lines)
     return lines
+
+
+def _safe_wildcard_parts(name: str) -> List[str]:
+    parts = []
+    for part in name.replace("\\", "/").split("/"):
+        part = part.strip()
+        if not part or part in {".", ".."}:
+            return []
+        parts.append(part)
+    return parts
+
+
+def _case_insensitive_child(parent: Path, name: str) -> Path | None:
+    candidate = parent / name
+    if candidate.exists():
+        return candidate
+
+    try:
+        name_lower = name.lower()
+        for child in parent.iterdir():
+            if child.name.lower() == name_lower:
+                return child
+    except OSError:
+        return None
+    return None
+
+
+def _case_insensitive_path(root: Path, relative_parts: List[str], suffix: str) -> Path | None:
+    current = root
+    for part in relative_parts[:-1]:
+        child = _case_insensitive_child(current, part)
+        if child is None or not child.is_dir():
+            return None
+        current = child
+
+    leaf = _case_insensitive_child(current, f"{relative_parts[-1]}{suffix}")
+    if leaf is not None and leaf.is_file():
+        return leaf
+    return None
 
 
 def _find_wildcard_file_in_dirs(name: str, dirs: List[Path]):
     """Find a wildcard file (.txt, .yaml, .yml) by name within given directories.
-    Tries exact filename match first (fast), then falls back to case-insensitive rglob.
-    YAML files are loaded via _read_wildcard_lines_yaml which uses a thread timeout
-    to prevent blocking ComfyUI on large files."""
-    name_norm = name.replace("\\", "/")
-    name_lower = name_norm.lower()
+    Tries direct paths only, including YAML prefix matches such as
+    __colors/dark__ -> colors.yaml key "dark". Avoid recursive scans here:
+    walking a large or cloud-backed wildcard tree can freeze ComfyUI."""
+    parts = _safe_wildcard_parts(name)
+    if not parts:
+        return None, []
+
+    cache_key = ("/".join(part.lower() for part in parts), tuple(str(d) for d in dirs))
+    cached = _WILDCARD_LOOKUP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     for wdir in dirs:
-        # Fast exact match — txt preferred, then yaml
+        # Fast exact match: __foo/bar__ -> foo/bar.txt, foo/bar.yaml, foo/bar.yml
         for ext in (".txt", ".yaml", ".yml"):
-            candidate = wdir / f"{name_norm}{ext}"
-            if candidate.exists():
-                return candidate, []
+            candidate = _case_insensitive_path(wdir, parts, ext)
+            if candidate is not None:
+                result = (candidate, [])
+                _WILDCARD_LOOKUP_CACHE[cache_key] = result
+                return result
 
-        # Case-insensitive fallback scan
-        try:
-            for wfile in wdir.rglob("*"):
-                if wfile.suffix.lower() not in (".txt", ".yaml", ".yml"):
-                    continue
-                rel = wfile.relative_to(wdir).with_suffix("").as_posix().lower()
-                if rel == name_lower:
-                    return wfile, []
-                # Support yaml key navigation: __colors/dark__ -> colors.yaml["dark"]
-                parts = name_lower.split("/")
-                for i in range(len(parts), 0, -1):
-                    file_part = "/".join(parts[:i])
-                    key_parts = parts[i:]
-                    if rel == file_part:
-                        return wfile, key_parts
-        except Exception as e:
-            print(f"[PromptLibrary] Error scanning {wdir}: {e}", flush=True)
+        # YAML key navigation: __foo/bar/baz__ can map to foo/bar.yaml["baz"]
+        # or foo.yaml["bar"]["baz"], without scanning the whole wildcard tree.
+        for index in range(len(parts) - 1, 0, -1):
+            file_parts = parts[:index]
+            key_parts = parts[index:]
+            for ext in (".yaml", ".yml"):
+                candidate = _case_insensitive_path(wdir, file_parts, ext)
+                if candidate is not None:
+                    result = (candidate, key_parts)
+                    _WILDCARD_LOOKUP_CACHE[cache_key] = result
+                    return result
 
     return None, []
 
@@ -335,10 +398,12 @@ def _entry_public(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_ref_node_id(value: Any) -> str:
+    # In the API prompt format a node reference is ALWAYS ["node_id", slot].
+    # Bare strings/ints are widget values (seed=512, steps=20, typed text) —
+    # treating them as node IDs let the walker jump into unrelated branches
+    # whenever a widget int happened to collide with a real node ID.
     if isinstance(value, (list, tuple)) and value:
         return str(value[0])
-    if isinstance(value, (str, int)):
-        return str(value)
     return ""
 
 
@@ -352,7 +417,7 @@ def _iter_child_node_ids(inputs: Dict[str, Any]) -> List[str]:
 
 
 def _is_sampler_node(node: Dict[str, Any]) -> bool:
-    """Return True if this node looks like a KSampler or equivalent."""
+    """Return True if this node looks like a KSampler or equivalent prompt-bearing node."""
     class_type = str(node.get("class_type", ""))
     inputs = node.get("inputs", {})
     if not isinstance(inputs, dict):
@@ -363,7 +428,11 @@ def _is_sampler_node(node: Dict[str, Any]) -> bool:
         or ("cond_pos" in inputs)
         or ("cond_neg" in inputs)
     )
-    return class_type.startswith("KSampler") or has_sampler_links
+    # Guider nodes (BasicGuider, CFGGuider, ...) carry the conditioning in
+    # SamplerCustomAdvanced pipelines — the sampler itself has no positive/
+    # negative inputs there, so the guider is the prompt-bearing node.
+    is_guider = "Guider" in class_type and "conditioning" in inputs
+    return class_type.startswith("KSampler") or has_sampler_links or is_guider
 
 
 def _find_relevant_sampler(prompt_graph: Dict[str, Any], gallery_node_id: str | None) -> Dict[str, Any] | None:
@@ -422,12 +491,10 @@ def _find_relevant_sampler(prompt_graph: Dict[str, Any], gallery_node_id: str | 
 
     return None
 
-def _resolve_text_from_ref(prompt_graph: Dict[str, Any], value: Any, visited: set[str] | None = None) -> str:
-    node_ref = ""
-    if isinstance(value, (list, tuple)) and value:
-        node_ref = str(value[0])
-    elif isinstance(value, (str, int)):
-        node_ref = str(value)
+def _resolve_text_from_ref(prompt_graph: Dict[str, Any], value: Any, visited: set[str] | None = None, role: str | None = None) -> str:
+    # Only real node references ([node_id, slot]) are followed. Bare strings/
+    # ints are widget values — following them caused cross-branch text bleed.
+    node_ref = _get_ref_node_id(value)
 
     if not node_ref:
         return ""
@@ -467,6 +534,16 @@ def _resolve_text_from_ref(prompt_graph: Dict[str, Any], value: Any, visited: se
             return val.strip()
         return ""
 
+    # PromptEnhancer node — the enhanced text only exists at runtime, never in
+    # the graph. Use the runtime output dict; fall back to following the
+    # (pre-enhancement) prompt input so we at least show something meaningful.
+    if class_type == "PromptEnhancer":
+        if node_ref in PROMPT_ENHANCER_OUTPUTS:
+            val = PROMPT_ENHANCER_OUTPUTS[node_ref]
+            if val and val.strip():
+                return val.strip()
+        return _resolve_text_from_ref(prompt_graph, inputs.get("prompt"), current_visited, role)
+
     if "TextEncode" in class_type:
         text_field_keys = ["text", "prompt", "text_g", "text_l", "clip_l", "clip_g", "t5xxl", "t5xxl_text"]
         parts: List[str] = []
@@ -480,7 +557,7 @@ def _resolve_text_from_ref(prompt_graph: Dict[str, Any], value: Any, visited: se
             elif isinstance(field_value, (list, tuple)) and field_value:
                 # It's a node reference — follow it upstream to resolve the string.
                 # This handles wildcard nodes, string concatenators, primitive nodes, etc.
-                resolved = _resolve_text_from_ref(prompt_graph, field_value, current_visited)
+                resolved = _resolve_text_from_ref(prompt_graph, field_value, current_visited, role)
                 if resolved:
                     parts.append(resolved)
         if parts:
@@ -492,14 +569,43 @@ def _resolve_text_from_ref(prompt_graph: Dict[str, Any], value: Any, visited: se
 
     # For non-TextEncode nodes (e.g. wildcard node, string node, primitive),
     # check common string output fields first before walking all children.
-    string_field_keys = ["text", "string", "value", "prompt", "output", "result", "wildcard_text", "populated_text"]
+    # populated_text (the EXPANDED wildcard result) must come before
+    # wildcard_text (the raw __template__) — the gallery should show the
+    # final prompt, not the unexpanded template.
+    string_field_keys = ["text", "string", "value", "prompt", "output", "result", "populated_text", "wildcard_text"]
     for key in string_field_keys:
         field_value = inputs.get(key)
         if isinstance(field_value, str) and field_value.strip():
             return field_value.strip()
 
-    for child_value in inputs.values():
-        text = _resolve_text_from_ref(prompt_graph, child_value, current_visited)
+    # Generic child walk — follow ONLY inputs that can plausibly carry prompt
+    # text or conditioning, and never cross into the opposite role's inputs.
+    # Walking model/clip/vae/latent children let the resolver wander into
+    # unrelated branches and return foreign text; walking `positive` while
+    # resolving the negative chain (e.g. through ControlNetApply) is what
+    # made positive and negative come back identical.
+    _TEXT_LIKE = ("text", "string", "prompt", "value", "wildcard", "populated",
+                  "result", "output", "conditioning", "cond")
+
+    def _key_allowed(key_lower: str) -> bool:
+        if role == "positive" and ("negative" in key_lower or key_lower == "cond_neg"):
+            return False
+        if role == "negative" and ("positive" in key_lower or key_lower == "cond_pos"):
+            return False
+        if role and role in key_lower:
+            return True
+        return any(t in key_lower for t in _TEXT_LIKE)
+
+    # Same-role keys first (e.g. follow ControlNetApply's `negative` input
+    # before its neutral conditioning-style inputs when resolving negative).
+    ordered_items = sorted(
+        inputs.items(),
+        key=lambda kv: 0 if (role and role in str(kv[0]).lower()) else 1,
+    )
+    for key, child_value in ordered_items:
+        if not _key_allowed(str(key).lower()):
+            continue
+        text = _resolve_text_from_ref(prompt_graph, child_value, current_visited, role)
         if text:
             return text
     return ""
@@ -515,13 +621,17 @@ def _extract_prompts(prompt_graph: Any, gallery_node_id: str | None = None) -> t
         if not isinstance(inputs, dict):
             inputs = {}
 
-        positive = _resolve_text_from_ref(prompt_graph, inputs.get("positive"))
-        negative = _resolve_text_from_ref(prompt_graph, inputs.get("negative"))
+        positive = _resolve_text_from_ref(prompt_graph, inputs.get("positive"), role="positive")
+        negative = _resolve_text_from_ref(prompt_graph, inputs.get("negative"), role="negative")
         if not positive:
-            positive = _resolve_text_from_ref(prompt_graph, inputs.get("cond_pos"))
+            positive = _resolve_text_from_ref(prompt_graph, inputs.get("cond_pos"), role="positive")
         if not negative:
-            negative = _resolve_text_from_ref(prompt_graph, inputs.get("cond_neg"))
-        if positive:
+            negative = _resolve_text_from_ref(prompt_graph, inputs.get("cond_neg"), role="negative")
+        if not positive:
+            # BasicGuider-style nodes (Flux / SamplerCustomAdvanced pipelines)
+            # carry a single `conditioning` input — that's the positive.
+            positive = _resolve_text_from_ref(prompt_graph, inputs.get("conditioning"), role="positive")
+        if positive or negative:
             return positive, negative
 
     samplers: list[dict[str, Any]] = []
@@ -540,6 +650,13 @@ def _extract_prompts(prompt_graph: Any, gallery_node_id: str | None = None) -> t
     if not samplers:
         return "", ""
 
+    # A global scan is only trustworthy when it's unambiguous. With multiple
+    # sampler-ish nodes (multi-pipeline workflows, ControlNet appliers, etc.),
+    # picking the lowest-numbered one returns prompts from a *different*
+    # pipeline — confidently wrong is worse than honestly unavailable.
+    if gallery_node_id is not None and len(samplers) > 1:
+        return "", ""
+
     def _sort_key(item: dict[str, Any]) -> tuple[int, str]:
         key = item["key"]
         return (0, key) if key.isdigit() else (1, key)
@@ -549,13 +666,13 @@ def _extract_prompts(prompt_graph: Any, gallery_node_id: str | None = None) -> t
     if not isinstance(inputs, dict):
         return "", ""
 
-    positive = _resolve_text_from_ref(prompt_graph, inputs.get("positive"))
-    negative = _resolve_text_from_ref(prompt_graph, inputs.get("negative"))
+    positive = _resolve_text_from_ref(prompt_graph, inputs.get("positive"), role="positive")
+    negative = _resolve_text_from_ref(prompt_graph, inputs.get("negative"), role="negative")
 
     if not positive:
-        positive = _resolve_text_from_ref(prompt_graph, inputs.get("cond_pos"))
+        positive = _resolve_text_from_ref(prompt_graph, inputs.get("cond_pos"), role="positive")
     if not negative:
-        negative = _resolve_text_from_ref(prompt_graph, inputs.get("cond_neg"))
+        negative = _resolve_text_from_ref(prompt_graph, inputs.get("cond_neg"), role="negative")
     return positive, negative
 
 
@@ -569,14 +686,11 @@ def _extract_prompts_with_fallback(prompt_graph: Any, extra_pnginfo: Any, galler
         return positive, negative, "unavailable"
 
     # --- Fallback 1: embedded prompt JSON (also scoped to gallery_node_id) ---
+    # NOTE: no unscoped retry here. An unscoped walk of a multi-pipeline
+    # workflow returns some OTHER pipeline's prompt — confidently wrong.
     embedded_prompt = extra_pnginfo.get("prompt")
     if embedded_prompt is not None:
         fallback_positive, fallback_negative = _extract_prompts(embedded_prompt, gallery_node_id)
-        if fallback_positive:
-            return fallback_positive, fallback_negative, "embedded prompt metadata"
-        # If gallery_node_id scoped walk failed, try unscoped on embedded prompt
-        # but only as a last resort before the stale workflow fallback.
-        fallback_positive, fallback_negative = _extract_prompts(embedded_prompt, None)
         if fallback_positive:
             return fallback_positive, fallback_negative, "embedded prompt metadata"
 
@@ -593,33 +707,71 @@ def _extract_prompts_with_fallback(prompt_graph: Any, extra_pnginfo: Any, galler
 
 
 def _extract_seed(prompt_graph: Any, gallery_node_id: str | None = None) -> int | None:
-    """Extract the seed from the sampler node connected to the gallery."""
+    """Extract the seed by walking upstream from the gallery's image input.
+
+    Every node on the walk is checked for a seed-ish field, so this works for
+    KSampler (seed), SamplerCustom (noise_seed) AND SamplerCustomAdvanced
+    pipelines where the seed lives on a separate RandomNoise node that the
+    old sampler-only lookup could never see.
+    """
     if not isinstance(prompt_graph, dict):
         return None
 
-    sampler = _find_relevant_sampler(prompt_graph, gallery_node_id)
-    if sampler is None:
-        # Fall back to any sampler in the graph
-        for node in prompt_graph.values():
-            if isinstance(node, dict) and _is_sampler_node(node):
-                sampler = node
-                break
+    seed_keys = ("seed", "noise_seed", "seed_num", "rand_seed")
 
-    if sampler is None:
+    def _seed_from_node(node: Any) -> int | None:
+        if not isinstance(node, dict):
+            return None
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            return None
+        for key in seed_keys:
+            val = inputs.get(key)
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, int):
+                return val
+            if isinstance(val, str) and val.isdigit():
+                return int(val)
         return None
 
-    inputs = sampler.get("inputs", {})
-    if not isinstance(inputs, dict):
-        return None
+    # --- Primary: BFS upstream from THIS gallery's image input ---
+    if gallery_node_id:
+        gallery_node = prompt_graph.get(str(gallery_node_id))
+        if isinstance(gallery_node, dict):
+            gallery_inputs = gallery_node.get("inputs", {})
+            if not isinstance(gallery_inputs, dict):
+                gallery_inputs = {}
+            start_node_id = _get_ref_node_id(gallery_inputs.get("images"))
+            if start_node_id:
+                from collections import deque
+                queue: deque[str] = deque([start_node_id])
+                visited: set[str] = set()
+                while queue:
+                    node_id = queue.popleft()
+                    if not node_id or node_id in visited:
+                        continue
+                    visited.add(node_id)
+                    node = prompt_graph.get(node_id)
+                    if not isinstance(node, dict):
+                        continue
+                    found = _seed_from_node(node)
+                    if found is not None:
+                        return found
+                    inputs = node.get("inputs", {})
+                    if isinstance(inputs, dict):
+                        for child_node_id in _iter_child_node_ids(inputs):
+                            if child_node_id not in visited:
+                                queue.append(child_node_id)
 
-    # Try common seed field names across different sampler types
-    for key in ("seed", "noise_seed", "seed_num", "rand_seed"):
-        val = inputs.get(key)
-        if isinstance(val, int):
-            return val
-        if isinstance(val, str) and val.isdigit():
-            return int(val)
-
+    # --- Fallback: only if the graph has exactly ONE seeded node (unambiguous) ---
+    seeds_found: list[int] = []
+    for node in prompt_graph.values():
+        found = _seed_from_node(node)
+        if found is not None:
+            seeds_found.append(found)
+    if len(seeds_found) == 1:
+        return seeds_found[0]
     return None
 
 
@@ -977,6 +1129,14 @@ class WorkflowGallery:
                 "filename_prefix": ("STRING", {"default": "workflow_gallery", "multiline": False}),
                 "max_images": ("INT", {"default": 48, "min": 1, "max": 500, "step": 1}),
             },
+            "optional": {
+                # Wire-only override sockets (forceInput => no widget is created,
+                # so widgets_values order is unchanged and saved workflows are safe).
+                # When connected, these are ground truth — the exact string fed to
+                # the encoder — and beat graph resolution entirely.
+                "positive_override": ("STRING", {"forceInput": True, "default": ""}),
+                "negative_override": ("STRING", {"forceInput": True, "default": ""}),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
                 "prompt": "PROMPT",
@@ -992,6 +1152,8 @@ class WorkflowGallery:
         output_directory: str = str(DEFAULT_SAVE_DIR),
         filename_prefix: str = "workflow_gallery",
         max_images: int = 48,
+        positive_override: str = "",
+        negative_override: str = "",
         unique_id: str | None = None,
         prompt: Dict[str, Any] | None = None,
         extra_pnginfo: Dict[str, Any] | None = None,
@@ -1010,6 +1172,17 @@ class WorkflowGallery:
         safe_prefix = _sanitize_prefix(filename_prefix)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         positive_prompt, negative_prompt, prompt_source = _extract_prompts_with_fallback(prompt, extra_pnginfo, node_id)
+
+        # Wired overrides are the exact strings fed to the encoder — ground
+        # truth. They always beat whatever the graph walk came up with.
+        if isinstance(positive_override, str) and positive_override.strip():
+            positive_prompt = positive_override.strip()
+            prompt_source = "direct input"
+        if isinstance(negative_override, str) and negative_override.strip():
+            negative_prompt = negative_override.strip()
+            if prompt_source == "unavailable":
+                prompt_source = "direct input"
+
         display_prompt = positive_prompt
         seed = _extract_seed(prompt, node_id)
         pnginfo = _build_pnginfo(prompt, extra_pnginfo)
@@ -1569,6 +1742,128 @@ PROMPT_ENHANCER_PRESETS: Dict[str, str] = {
         "or moralize. Absolute rule: all subjects are adults; never sexualize anyone who is or appears underage, "
         "and if age is uncertain, do not sexualize them."
     ),
+    "MiniMax H3 Base": (
+        "You write prompts for MiniMax H3 Text to Video + Audio mode (T2VA). The user's text is a directing "
+        "instruction, not prompt content to copy literally. Turn it into a concise audiovisual prompt. "
+        "Do not mention pictures, references, or reference labels in T2VA output.\n\n"
+        "OUTPUT: reply with ONLY these three fields in this exact order and with these exact names:\n"
+        "integrated_multimodal_description: [Shot 1] ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "In integrated_multimodal_description, begin [Shot 1] with the visual style and initial composition, "
+        "then describe a continuous physical progression: initial state, action beginning, development, "
+        "consequence or reaction, and ending state. Use natural pacing words such as slowly, gradually, briefly, "
+        "then, as, while, and near the end. Keep all action in [Shot 1] when the camera does not cut; a new "
+        "character action is not a new shot. Create [Shot 2], [Shot 3], and so on only for actual camera cuts or "
+        "clearly separate shots. The first shot has no timestamp. A later shot may begin, for example, "
+        "'[Shot 2] At 00:04.500, the camera cuts to...'. Do not divide the clip into small timestamp ranges or "
+        "write a frame-by-frame screenplay. Use exact timestamps only when they materially align a real cut or "
+        "an important synchronized event. Include enough coherent action for the requested duration without "
+        "accounting for every second.\n\n"
+        "Give every speaking or singing source a stable ID such as (S1). Put only the original dialogue or "
+        "lyrics inside <d>[Language] ...</d>; preserve their wording, punctuation, and language exactly. Keep "
+        "dialogue at the corresponding action beat inside integrated_multimodal_description and do not repeat or "
+        "paraphrase it in overall_soundscape. Put visible scene text in double quotes. overall_soundscape is a "
+        "concise description of environmental and diegetic audio such as ambience, footsteps, wind, machinery, "
+        "impacts, cloth movement, breathing, laughter, or physical effects. non_diegetic_music describes only "
+        "music requested by the user or clearly required by the source prompt; otherwise output exactly N/A. "
+        "Describe what should happen. Do not invent dialogue, lyrics, visible text, music, or unrelated negative "
+        "restrictions the user did not request."
+    ),
+    "MiniMax H3 Frame-to-Frame": (
+        "You write prompts for MiniMax H3 First/Last Image to Video + Audio mode (FL2VA). The user's text is a "
+        "directing instruction for motion between the supplied first and last images, not a description to assign "
+        "to either image. Preserve the reference tags exactly as <Picture 1> and <Picture 2>; their numbering "
+        "must follow the actual input or connection order. Never rename a tag or replace it with a subject name.\n\n"
+        "OUTPUT: reply with the alignment instruction followed by ONLY these three fields in this exact order:\n"
+        "How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the "
+        "0.00-second mark of the target video; <Picture 2> (from [Shot N]) aligns with the S.SS-second mark of the "
+        "target video.\n\n"
+        "integrated_multimodal_description: [Shot 1] ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "Replace N with the actual final shot and S.SS with the requested duration to exactly two decimals. "
+        "Keep a continuous camera take under [Shot 1] unless there is an actual cut; do not create a new shot for "
+        "each action. Establish <Picture 1>'s identity, style, composition, objects, and spatial relationships, "
+        "then describe a coherent physical progression toward <Picture 2>: action begins, develops, causes a "
+        "reaction or consequence, and naturally reaches the final image. Preserve identity, facial appearance, "
+        "hairstyle, costume, colors, important props, environment, visual style, and relevant spatial continuity "
+        "while allowing pose, expression, body position, and movement to change. Do not merely describe two "
+        "static images. Do not use micro-timestamp ranges; reserve exact times for the required first/last-frame "
+        "alignment, actual cuts, or important synchronized events.\n\n"
+        "Keep requested dialogue at its action beat inside integrated_multimodal_description, preserving it "
+        "verbatim inside <d>[Language] ...</d> with stable speaker IDs such as (S1). overall_soundscape contains "
+        "only ambience and physical or diegetic sounds, without restating dialogue. Set non_diegetic_music to N/A "
+        "unless music is requested or clearly required. Do not invent unrelated negative restrictions."
+    ),
+    "MiniMax H3 Last-Frame": (
+        "You write prompts for MiniMax H3 Last Image to Video + Audio mode (L2VA). <Picture 1> is the supplied "
+        "last image that the generated video must reach at the final instant. The user's text directs the preceding "
+        "action; it is not a description of a first image. Preserve the exact <Picture 1> tag and keep numbering "
+        "consistent with actual input or connection order. Never rename the tag or substitute a descriptive name.\n\n"
+        "OUTPUT: reply with this alignment instruction, followed by ONLY these three fields in this exact order:\n"
+        "How the reference pictures align with the target video — <Picture 1> (from [Shot N]) aligns with the "
+        "S.SS-second mark of the target video.\n\n"
+        "integrated_multimodal_description: [Shot 1] ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "Replace N with the actual final shot and S.SS with the requested duration to exactly two decimals. In "
+        "integrated_multimodal_description, write a plausible continuous progression that culminates in the "
+        "composition and state of <Picture 1> at the end. Begin [Shot 1] with the initial state, then let the "
+        "action begin, develop, produce a consequence or reaction, and settle into the supplied last image. "
+        "Preserve character and facial identity, hairstyle, costume, colors, important props, environment, visual "
+        "style, and relevant spatial relationships while allowing pose, expression, body position, and movement "
+        "to change. Keep one continuous camera take under [Shot 1] unless an actual cut is requested or necessary. "
+        "Do not create new shots for new actions and do not divide the duration into micro-timestamps. Use exact "
+        "timing only for the required last-image alignment, an actual cut, or an important synchronized event.\n\n"
+        "Keep requested dialogue at the matching action beat inside integrated_multimodal_description, preserving "
+        "it verbatim inside <d>[Language] ...</d> with stable speaker IDs such as (S1). overall_soundscape contains "
+        "environmental and physical diegetic audio without restating dialogue. Set non_diegetic_music to N/A "
+        "unless the user requests music or the source prompt clearly calls for it. Describe what should happen and "
+        "do not invent unrelated negative restrictions."
+    ),
+    "MiniMax H3 Reference": (
+        "You write prompts for MiniMax H3 Reference to Video + Audio mode (Ref2VA). The user's text is a directing instruction. For "
+        "example, 'write a 15 second scene for the female in reference 1; she dances in the rain in a 1950s "
+        "black-and-white Broadway musical' means: retain the female from Reference 1 as the referenced subject, "
+        "then invent and fully stage the requested dance scene around her. It does not mean the instruction itself "
+        "describes the reference image. Rewrite the request using stable labels for every reference the user "
+        "actually identifies. Reply with ONLY these six sections in this exact order and "
+        "with these exact names:\n"
+        "subject_definitions: ...\n"
+        "summary: ...\n"
+        "retention_analysis: ...\n"
+        "detailed_description: ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "In subject_definitions, assign stable <Subject N> labels to reusable visible content, <Picture N> to "
+        "concrete frame or storyboard anchors, <Video N> to source-video or temporal-structure relationships, "
+        "and <Audio N> to copied or referenced audio signals. Preserve <Picture N>, <Video N>, and <Audio N> "
+        "exactly, number each modality independently according to actual input or connection order, and never "
+        "rename a tag or substitute a descriptive name. Give each tracked item its own line and never change a "
+        "label's meaning. When the asset itself is not visible to you, define only the role stated by the "
+        "user (for example, '<Subject 1> is the female from <Picture 1>') and never fabricate her appearance. "
+        "In summary, begin with the applicable square-bracketed task types chosen from "
+        "keyframe completion, reference generation, video editing, video continuation, audio reuse, and audio "
+        "reference, joined with ' + ', then briefly state the target and reference relationships.\n\n"
+        "In retention_analysis, give every label one line with its shots or role and the correct fixed marker: "
+        "visible references use fully_preserved, partially_preserved, attribute_transfer, or weak_reference; "
+        "audio uses fully_copy, partially_copy, reference, or weak_reference. In detailed_description, establish "
+        "the overall style before [Shot 1], then describe continuous physical action in playback order: initial "
+        "state, action beginning, development, consequence or reaction, and ending state. Keep changing actions "
+        "inside the same shot; add [Shot 2], [Shot 3], and so on only for real camera cuts or clearly separate "
+        "shots. Later shots may use '[Shot N] At MM:SS.mmm, the camera cuts to...'. Do not split the clip into "
+        "micro-timestamp ranges or a frame-by-frame screenplay. Use exact timing only for reference alignment, "
+        "actual cuts, or important synchronized events. Preserve referenced identity, facial appearance, hairstyle, "
+        "costume, colors, important props, environment, visual style, and relevant spatial relationships while "
+        "allowing requested pose, expression, body position, and movement changes.\n\n"
+        "Use stable speaker IDs such as (S1), preserve requested speech inside <d>[Language] ...</d>, and keep it "
+        "at the matching action beat in detailed_description. Do not repeat or paraphrase dialogue in "
+        "overall_soundscape; that section covers environmental and physical diegetic sounds such as ambience, "
+        "footsteps, machinery, breathing, laughter, cloth movement, impacts, and effects. Set "
+        "non_diegetic_music to N/A unless music is requested or clearly required. Do not invent dialogue, music, "
+        "visible text, unresolved labels, or unrelated negative restrictions, and do not write a mere plot summary."
+    ),
     "Custom": (
         "You are an expert prompt engineer for AI image and video generation models. "
         "Your job is to aggressively enhance the user's rough prompt into a rich, detailed, effective generation prompt. "
@@ -1650,6 +1945,104 @@ PROMPT_ENHANCER_PRESETS: Dict[str, str] = {
         "omit, or sanitize. Absolute rule: treat all subjects as adults; never sexualize anyone who is or appears "
         "underage, and if age is uncertain, do not sexualize them."
     ),
+    "MiniMax H3 Base (Vision)": (
+        "You write prompts for MiniMax H3 Image to Video + Audio mode (I2VA). The attached image is <Picture 1>, the fully "
+        "referenced first frame of [Shot 1] at 0.00 seconds. The user's text is a directing instruction for what "
+        "happens from that frame, not a description of the image and not a requested final-frame description.\n\n"
+        "OUTPUT: reply with ONLY the following instruction and three fields in this exact order:\n"
+        "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully "
+        "referenced.\n\n"
+        "integrated_multimodal_description: [Shot 1] ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "Start [Shot 1] by anchoring the visible style, subjects, composition, clothing, colors, important props, "
+        "environment, and spatial relationships from <Picture 1>. Preserve character identity, facial appearance, "
+        "hairstyle, costume, colors, environment, and visual style while allowing the requested movement, "
+        "expressions, body-position changes, and pose changes. Continue as coherent physical progression: initial "
+        "state, action beginning, development, consequence or reaction, and ending state. Use natural pacing words "
+        "instead of numeric choreography. Keep all actions under [Shot 1] when the camera remains continuous. Add "
+        "[Shot 2] or later labels only for actual cuts or clearly separate shots, optionally with a useful cut time "
+        "such as '[Shot 2] At 00:04.500, the camera cuts to...'. Do not divide the clip into micro-timestamp "
+        "ranges or account for every second. Exact timing is only for reference alignment, actual cuts, or "
+        "important synchronized events.\n\n"
+        "Give vocal sources stable IDs such as (S1), and preserve user-provided speech inside "
+        "<d>[Language] ...</d> at the matching action beat inside integrated_multimodal_description. Do not repeat "
+        "or paraphrase dialogue in overall_soundscape; use that section for environmental and physical diegetic "
+        "audio such as ambience, footsteps, wind, cloth movement, breathing, laughter, impacts, and effects. Set "
+        "non_diegetic_music to exactly N/A unless music is requested or clearly called for. Describe what should "
+        "happen and do not invent unrelated negative restrictions. Keep the result concise for H3."
+    ),
+    "MiniMax H3 Frame-to-Frame (Vision)": (
+        "You write prompts for MiniMax H3 First/Last Image to Video + Audio mode (FL2VA). The attached image is "
+        "<Picture 1>, the first-image reference. <Picture 2> is the last-image reference identified by the user's "
+        "workflow or instruction. Preserve both tags exactly and keep their numbering in actual input or connection "
+        "order. The user's text directs the motion between them and is not a description of <Picture 2>.\n\n"
+        "OUTPUT: begin exactly with 'How the reference pictures align with the target video — <Picture 1> "
+        "(from [Shot 1]) aligns with the 0.00-second mark of the target video; <Picture 2> (from [Shot N]) aligns "
+        "with the S.SS-second mark of the target video.' Replace N and S.SS with the actual final shot and "
+        "requested duration. Then write ONLY these fields in this exact order:\n"
+        "integrated_multimodal_description: [Shot 1] ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "Anchor <Picture 1>'s visible identity, style, composition, clothing, colors, props, environment, and "
+        "spatial relationships, then write a continuous physical progression that reaches <Picture 2> at the final "
+        "instant. Preserve continuity without freezing pose, expression, body position, or movement. Keep one "
+        "continuous [Shot 1] unless an actual camera cut occurs. Do not create shots for action changes and do not "
+        "use micro-timestamp ranges; reserve exact timing for first/last-image alignment, real cuts, or important "
+        "synchronized events. Keep requested speech in integrated_multimodal_description. Use overall_soundscape "
+        "only for environmental and physical diegetic audio without repeating dialogue. Set "
+        "non_diegetic_music to N/A unless music is requested or clearly called for, and do not invent unrelated "
+        "negative restrictions."
+    ),
+    "MiniMax H3 Last-Frame (Vision)": (
+        "You write prompts for MiniMax H3 Last Image to Video + Audio mode (L2VA). The attached image is "
+        "<Picture 1>, the supplied last image that the generated video must reach at the final instant. Treat the "
+        "user's text as direction for the action leading into that image, not as a description of a first frame.\n\n"
+        "OUTPUT: begin exactly with 'How the reference pictures align with the target video — <Picture 1> "
+        "(from [Shot N]) aligns with the S.SS-second mark of the target video.' Replace N and S.SS with the actual "
+        "final shot and requested duration. Then write ONLY these fields in this exact order:\n"
+        "integrated_multimodal_description: [Shot 1] ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "Preserve the exact <Picture 1> tag and its actual input or connection numbering.\n\n"
+        "Write a coherent physical progression under [Shot 1] that begins in a plausible earlier state and "
+        "culminates in <Picture 1>. Preserve character identity, facial appearance, hairstyle, costume, colors, "
+        "important props, environment, visual style, and relevant spatial relationships while allowing pose, "
+        "expression, body position, and movement to change. Add later shots only for actual cuts. Avoid "
+        "micro-timestamps and use exact timing only for last-image alignment, a real cut, or an important "
+        "synchronized event. Keep dialogue at its action beat in integrated_multimodal_description; keep only "
+        "environmental and physical diegetic audio in overall_soundscape. Set non_diegetic_music to N/A unless "
+        "music is requested or clearly called for. Do not invent unrelated negative restrictions."
+    ),
+    "MiniMax H3 Reference (Vision)": (
+        "You write prompts for MiniMax H3 Reference to Video + Audio mode (Ref2VA). Treat the attached image as "
+        "<Picture 1>, the first connected reference asset, not automatically as the first frame of the target "
+        "video. Treat the user's text only as a directing instruction for how the reference is used.\n\n"
+        "OUTPUT: reply with ONLY these six sections in this exact order and with these exact names:\n"
+        "subject_definitions: ...\n"
+        "summary: ...\n"
+        "retention_analysis: ...\n"
+        "detailed_description: ...\n"
+        "overall_soundscape: ...\n"
+        "non_diegetic_music: ...\n\n"
+        "Assign stable <Subject N>, <Picture N>, "
+        "<Video N>, and <Audio N> labels only where their roles apply. Define reusable visible content as subjects; "
+        "use picture labels only for concrete frame or storyboard anchors. Preserve <Picture N>, <Video N>, and "
+        "<Audio N> exactly, number each modality independently by actual input or connection order, and never "
+        "change a label's meaning or replace a tag with a descriptive name.\n\n"
+        "Begin summary with the applicable task types in square brackets. Give every label a retention_analysis "
+        "line using the official fixed relationship marker appropriate to visible or audio content. Before [Shot 1] "
+        "in detailed_description, establish the overall style, then write the target video shot by shot with exact "
+        "reference points, composition, subjects, environment, lighting, continuous physical action, camera, and "
+        "synchronized sound. Keep one shot for continuous camera action and create later [Shot N] labels only for "
+        "real cuts or separate shots. Avoid micro-timestamp ranges; use exact times only for reference alignment, "
+        "actual cuts, or important synchronized events. Preserve identity, appearance, costume, colors, environment, "
+        "style, and relevant spatial continuity while allowing requested pose, expression, body-position, and "
+        "movement changes. Keep requested dialogue at its action beat in detailed_description and do not restate "
+        "it in overall_soundscape. Set non_diegetic_music to N/A unless music is requested or clearly called for. "
+        "Write all structural prose in English while preserving dialogue, lyrics, and visible text in their "
+        "original language. Do not invent unseen conflicting details or unrelated negative restrictions."
+    ),
     "Custom (Vision)": (
         "You are a visual analyst and prompt engineer for AI image and video generation models. "
         "You are looking at a reference image. Generate a detailed generation prompt that would recreate or extend it. "
@@ -1673,6 +2066,17 @@ PROMPT_ENHANCER_DEFAULT_URLS: Dict[str, str] = {
     "Kobold": "http://localhost:5001/v1",
 }
 
+# Keep this in sync with ComfyUI's built-in CLIPLoader. The selected type is
+# important because the same Qwen/Gemma weights can use different wrappers.
+PROMPT_ENHANCER_LOCAL_CLIP_TYPES = [
+    "stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi",
+    "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma",
+    "ace", "omnigen2", "qwen_image", "hunyuan_image", "flux2", "ovis",
+    "longcat_image", "cogvideox", "lens", "pixeldit", "ideogram4", "boogu",
+    "krea2", "joyimage", "mage", "minimax",
+]
+PROMPT_ENHANCER_CONNECTED_CLIP = "(use connected CLIP input)"
+
 
 class PromptEnhancer:
     CATEGORY = "utils/prompt"
@@ -1692,10 +2096,11 @@ class PromptEnhancer:
         # Vision variants are auto-selected at runtime when an IMAGE is connected —
         # don't expose them in the dropdown.
         preset_names = [k for k in PROMPT_ENHANCER_PRESETS if not k.endswith("(Vision)")]
+        local_encoders = list(folder_paths.get_filename_list("text_encoders"))
         return {
             "required": {
                 "enabled": ("BOOLEAN", {"default": True}),
-                "backend": (["Ollama", "OpenRouter", "NanoGPT", "Kobold"],),
+                "backend": (["Ollama", "OpenRouter", "NanoGPT", "Kobold", "ComfyUI Local"],),
                 "api_url": ("STRING", {"default": "http://localhost:11434/v1", "multiline": False}),
                 "api_key": ("STRING", {"default": "", "multiline": False, "placeholder": "Active API key (auto-fills from saved keys below)"}),
                 "openrouter_key": ("STRING", {"default": "", "multiline": False, "placeholder": "OpenRouter API key — saved permanently"}),
@@ -1707,10 +2112,23 @@ class PromptEnhancer:
                 "max_tokens": ("INT", {"default": 512, "min": 64, "max": 4096}),
                 "thinking_mode": ("BOOLEAN", {"default": False}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                # Append new serialized widgets after all legacy widgets so saved
+                # workflows keep their positional widget values intact.
+                "local_text_encoder": ([PROMPT_ENHANCER_CONNECTED_CLIP, *local_encoders], {
+                    "tooltip": "Generative checkpoint in models/text_encoders. Connect CLIP below to reuse an already-loaded model and save VRAM."
+                }),
+                "local_clip_type": (PROMPT_ENHANCER_LOCAL_CLIP_TYPES, {
+                    "default": "flux2",
+                    "tooltip": "Must match the ComfyUI CLIPLoader type intended for this checkpoint."
+                }),
             },
             "optional": {
                 "prompt": ("STRING", {"forceInput": True}),
                 "image": ("IMAGE",),
+                "clip": ("CLIP", {"tooltip": "Reuse an existing CLIP/text encoder instead of loading local_text_encoder again."}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -1723,6 +2141,8 @@ class PromptEnhancer:
         openrouter_key: str = "",
         nanogpt_key: str = "",
         model_name: str = "llama3",
+        local_text_encoder: str = PROMPT_ENHANCER_CONNECTED_CLIP,
+        local_clip_type: str = "flux2",
         target_model: str = "Flux / Z-Image",
         system_prompt: str = "",
         manual_addons: str = "",
@@ -1731,12 +2151,22 @@ class PromptEnhancer:
         seed: int = 0,
         prompt: str = "",
         image=None,
+        clip=None,
+        unique_id: str | None = None,
     ):
-        print(f"[PromptEnhancer] Got prompt={prompt!r:.60} enabled={enabled} model={model_name} thinking={thinking_mode} seed={seed} has_image={image is not None}", flush=True)
+        def _out(text: str):
+            # Record the ACTUAL output so the gallery's prompt resolver can show
+            # the final enhanced prompt instead of the pre-enhancement input.
+            if unique_id is not None:
+                PROMPT_ENHANCER_OUTPUTS[str(unique_id)] = text or ""
+            return (text,)
+
+        selected_model = local_text_encoder if backend == "ComfyUI Local" else model_name
+        print(f"[PromptEnhancer] Got prompt={prompt!r:.60} enabled={enabled} backend={backend} model={selected_model} thinking={thinking_mode} seed={seed} has_image={image is not None}", flush=True)
 
         if not enabled or (not prompt.strip() and image is None):
             print(f"[PromptEnhancer] Bypassing — enabled={enabled} prompt_empty={not prompt.strip()}", flush=True)
-            return (prompt,)
+            return _out(prompt)
 
         # Use saved key for OpenRouter/NanoGPT if api_key is blank
         active_key = api_key.strip()
@@ -1761,15 +2191,24 @@ class PromptEnhancer:
 
         user_content: Any
         if image is not None:
-            # Convert tensor image to base64 PNG
             try:
                 import numpy as _np
                 from PIL import Image as _PILImage
-                img_array = (_np.clip(image[0].cpu().numpy(), 0, 1) * 255).astype(_np.uint8)
-                pil_img = _PILImage.fromarray(img_array)
-                buf = _io.BytesIO()
-                pil_img.save(buf, format="PNG")
-                img_b64 = _b64.b64encode(buf.getvalue()).decode("utf-8")
+
+                frame_indices = [0]
+
+                image_parts = []
+                encoded_sizes = []
+                for frame_index in frame_indices:
+                    img_array = (_np.clip(image[frame_index].cpu().numpy(), 0, 1) * 255).astype(_np.uint8)
+                    pil_img = scale_for_provider(_PILImage.fromarray(img_array), backend)
+                    buf = _io.BytesIO()
+                    pil_img.save(buf, format="PNG")
+                    img_b64 = _b64.b64encode(buf.getvalue()).decode("utf-8")
+                    image_parts.append(
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                    )
+                    encoded_sizes.append(f"{pil_img.size[0]}x{pil_img.size[1]}")
 
                 # Auto-select the vision system prompt for this target model
                 # (falls back to the text preset if no vision variant exists).
@@ -1778,7 +2217,23 @@ class PromptEnhancer:
 
                 # The user's prompt is a DIRECTIVE, not background noise — keep it
                 # primary. Text goes BEFORE the image (more reliable across VL backends).
-                if prompt.strip():
+                if target_model.startswith("MiniMax H3"):
+                    if target_model == "MiniMax H3 Last-Frame":
+                        image_role = "The attached image is <Picture 1>, the last image of the MiniMax H3 L2VA video."
+                    elif target_model == "MiniMax H3 Frame-to-Frame":
+                        image_role = "The attached image is <Picture 1>, the first-image reference of the MiniMax H3 FL2VA video."
+                    elif target_model == "MiniMax H3 Reference":
+                        image_role = "The attached image is <Picture 1>, the first connected reference asset for MiniMax H3 Ref2VA."
+                    else:
+                        image_role = "The attached image is <Picture 1>, the initial image and first frame of the MiniMax H3 I2VA video."
+                    if prompt.strip():
+                        text_part = (
+                            f"{image_role} Treat the following text only as the directing instruction for the "
+                            f"selected generation mode, following the system instructions: {prompt.strip()}"
+                        )
+                    else:
+                        text_part = f"{image_role} Generate a complete prompt following the system instructions."
+                elif prompt.strip():
                     text_part = (
                         "Use the attached image as the visual reference and follow the "
                         f"system instructions. Apply this user direction: {prompt.strip()}"
@@ -1788,12 +2243,13 @@ class PromptEnhancer:
                 if manual_addons.strip():
                     text_part += f"\n\nAdditional instructions: {manual_addons.strip()}"
 
-                user_content = [
-                    {"type": "text", "text": text_part},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                ]
+                user_content = [{"type": "text", "text": text_part}, *image_parts]
                 _vmode = "user-edited, kept" if user_edited_system else "auto-selected"
-                print(f"[PromptEnhancer] Image attached ({pil_img.size[0]}x{pil_img.size[1]}) — vision system prompt {_vmode}", flush=True)
+                print(
+                    f"[PromptEnhancer] Attached {len(image_parts)} vision frame(s) "
+                    f"({', '.join(encoded_sizes)}) — vision system prompt {_vmode}",
+                    flush=True,
+                )
             except Exception as img_err:
                 print(f"[PromptEnhancer] Image encode failed: {img_err} — falling back to text only", flush=True)
                 user_content = prompt.strip()
@@ -1827,6 +2283,10 @@ class PromptEnhancer:
         headers = {"Content-Type": "application/json"}
         if active_key:
             headers["Authorization"] = f"Bearer {active_key}"
+            if backend == "NanoGPT":
+                # NanoGPT supports either header. Send both so authentication still
+                # works through local proxies that strip the Authorization header.
+                headers["X-API-Key"] = active_key
         # OpenRouter requires these headers or returns 400
         if backend == "OpenRouter":
             headers["HTTP-Referer"] = "https://github.com/lokitsar/ComfyUI-Workflow-Gallery"
@@ -1840,6 +2300,33 @@ class PromptEnhancer:
         ollama_base = base_url
         if ollama_base.endswith("/v1"):
             ollama_base = ollama_base[:-3]
+
+        def unload_ollama_model():
+            """Release a local Ollama model so it cannot starve ComfyUI of VRAM."""
+            if backend != "Ollama" or not model_name.strip():
+                return
+            ep = f"{ollama_base}/api/generate"
+            p = {"model": model_name.strip(), "keep_alive": 0, "stream": False}
+            try:
+                req = _urlreq.Request(
+                    ep,
+                    data=_json.dumps(p).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _urlreq.urlopen(req, timeout=30) as resp:
+                    resp.read()
+                print(
+                    f"[PromptEnhancer] Unloaded Ollama model {model_name.strip()!r} to free GPU memory",
+                    flush=True,
+                )
+            except Exception as unload_err:
+                # Prompt enhancement should still succeed if an older/non-local Ollama
+                # endpoint cannot service the explicit unload request.
+                print(
+                    f"[PromptEnhancer] WARNING: could not unload Ollama model: {unload_err}",
+                    flush=True,
+                )
 
         def _msg_text(msg):
             """Pull assistant text from an OpenAI-style message, tolerating reasoning
@@ -1855,6 +2342,17 @@ class PromptEnhancer:
             if not content:  # null/empty -> fall back to reasoning fields
                 content = msg.get("reasoning_content") or msg.get("reasoning") or ""
             return (content or "").strip()
+
+        def _http_error_detail(error):
+            try:
+                body = error.read().decode("utf-8", errors="replace")
+                parsed = _json.loads(body)
+                detail = parsed.get("error", parsed)
+                if isinstance(detail, dict):
+                    return str(detail.get("message") or detail.get("code") or "").strip()
+                return str(detail).strip()
+            except Exception:
+                return ""
 
         # Stop sequences: cut generation at the reflection cue words reasoning models
         # use to second-guess themselves ("Refining…", "Revised…", "Drafting…"). These
@@ -1893,6 +2391,7 @@ class PromptEnhancer:
                 "model": model_name.strip(),
                 "messages": messages,
                 "stream": False,
+                "keep_alive": 0,
                 "options": opts,
             }
             print(f"[PromptEnhancer] Trying Ollama native at {ep} (seed={seed})", flush=True)
@@ -1971,34 +2470,145 @@ class PromptEnhancer:
             text = _re2.sub(r'^["\u201c\u201d\']+|["\u201c\u201d\']+$', "", text).strip()
             return text.strip()
 
+        if backend == "ComfyUI Local":
+            local_clip = clip
+            loaded_here = False
+            if local_clip is None:
+                if not local_text_encoder or local_text_encoder == PROMPT_ENHANCER_CONNECTED_CLIP:
+                    raise RuntimeError(
+                        "Prompt Enhancer: choose a local_text_encoder or connect a CLIP input."
+                    )
+                try:
+                    import comfy.sd as _comfy_sd
+
+                    clip_path = folder_paths.get_full_path_or_raise(
+                        "text_encoders", local_text_encoder
+                    )
+                    clip_type = getattr(
+                        _comfy_sd.CLIPType,
+                        local_clip_type.upper(),
+                        _comfy_sd.CLIPType.STABLE_DIFFUSION,
+                    )
+                    local_clip = _comfy_sd.load_clip(
+                        ckpt_paths=[clip_path],
+                        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                        clip_type=clip_type,
+                    )
+                    loaded_here = True
+                except Exception as load_err:
+                    raise RuntimeError(
+                        f"Prompt Enhancer could not load local text encoder "
+                        f"{local_text_encoder!r} as {local_clip_type!r}: {load_err}"
+                    ) from load_err
+
+            if not callable(getattr(local_clip, "generate", None)) or not callable(
+                getattr(local_clip, "decode", None)
+            ):
+                raise RuntimeError(
+                    "Prompt Enhancer: this CLIP/text encoder is conditioning-only and "
+                    "does not expose text generation. Use a complete Qwen, Gemma, "
+                    "Llama, or other causal-language-model text encoder."
+                )
+
+            local_user = prompt.strip()
+            if manual_addons.strip():
+                local_user += f"\n\nAdditional instructions: {manual_addons.strip()}"
+            local_request = (
+                f"{sys_content}\n\n"
+                f"Input prompt:\n{local_user}\n\n"
+                "Return only the enhanced prompt requested above, with no analysis, "
+                "heading, quotation marks, or Markdown."
+            ).strip()
+
+            try:
+                tokenize_kwargs = {"min_length": 1, "thinking": thinking_mode}
+                if image is not None:
+                    # Compatible VL encoders consume the original tensor directly;
+                    # no lossy PNG/base64 round trip is needed for local generation.
+                    tokenize_kwargs["image"] = image
+                tokens = local_clip.tokenize(local_request, **tokenize_kwargs)
+                local_seed = seed if seed != 0 else random.SystemRandom().randrange(1, 2**63)
+                generated_ids = local_clip.generate(
+                    tokens,
+                    do_sample=True,
+                    max_length=max_tokens,
+                    temperature=0.7,
+                    top_k=64,
+                    top_p=0.95,
+                    min_p=0.05,
+                    repetition_penalty=1.05,
+                    presence_penalty=0.0,
+                    seed=local_seed,
+                )
+                enhanced = strip_thinking(local_clip.decode(generated_ids))
+                if not enhanced:
+                    raise RuntimeError("the model returned an empty response")
+                if local_clip_type == "minimax":
+                    print(
+                        "[PromptEnhancer] WARNING: MiniMax H3's Qwen3-VL-32B "
+                        "checkpoint is truncated for conditioning; generated text may "
+                        "be lower quality than a complete instruct checkpoint.",
+                        flush=True,
+                    )
+                source = "connected CLIP" if clip is not None else local_text_encoder
+                print(
+                    f"[PromptEnhancer] Enhanced locally with {source!r}: {enhanced[:120]!r}",
+                    flush=True,
+                )
+                return _out(enhanced)
+            except Exception as generation_err:
+                raise RuntimeError(
+                    "Prompt Enhancer local generation failed. The file may be a "
+                    "conditioning-only encoder, may use the wrong local_clip_type, or "
+                    "may lack the layers needed for text generation. "
+                    f"Details: {generation_err}"
+                ) from generation_err
+            finally:
+                # Drop only the reference created by this node. ComfyUI's model manager
+                # retains control of device/offload state; connected CLIPs are untouched.
+                if loaded_here:
+                    del local_clip
+
         try:
             enhanced = strip_thinking(try_openai_compat())
             if not enhanced:
-                print(f"[PromptEnhancer] WARNING: LLM returned no usable text (content was empty/null). "
-                      f"If this is a reasoning model, it likely spent the whole max_tokens budget "
-                      f"({max_tokens}) on thinking — raise max_tokens or use a non-thinking model. "
-                      f"Returning original prompt.", flush=True)
-                return (prompt,)
+                raise RuntimeError(
+                    "Prompt Enhancer received an empty response. Raise max_tokens or choose a non-thinking model."
+                )
             print(f"[PromptEnhancer] Enhanced (OpenAI compat): {enhanced[:120]!r}", flush=True)
-            return (enhanced,)
+            return _out(enhanced)
         except _urlerr.HTTPError as e:
+            detail = _http_error_detail(e)
             if e.code == 404 and backend == "Ollama":
                 print(f"[PromptEnhancer] OpenAI compat returned 404, trying Ollama native API...", flush=True)
                 try:
                     enhanced = strip_thinking(try_ollama_native())
                     if not enhanced:
-                        print(f"[PromptEnhancer] WARNING: Ollama native also returned empty", flush=True)
-                        return (prompt,)
+                        raise RuntimeError("Prompt Enhancer received an empty response from Ollama.")
                     print(f"[PromptEnhancer] Enhanced (Ollama native): {enhanced[:120]!r}", flush=True)
-                    return (enhanced,)
+                    return _out(enhanced)
                 except Exception as e2:
                     print(f"[PromptEnhancer] Ollama native also failed: {e2}", flush=True)
-                    return (prompt,)
-            print(f"[PromptEnhancer] ERROR: {e} — returning original prompt", flush=True)
-            return (prompt,)
+                    raise RuntimeError(f"Prompt Enhancer could not reach Ollama: {e2}") from e2
+            if e.code == 401:
+                message = f"Prompt Enhancer: {backend} rejected the API key (401 Unauthorized)."
+                if backend == "NanoGPT":
+                    message += " Paste a valid, active NanoGPT key into api_key or nanogpt_key."
+                if detail:
+                    message += f" Provider message: {detail}"
+                raise RuntimeError(message) from e
+            message = f"Prompt Enhancer request failed: HTTP {e.code} from {backend}."
+            if detail:
+                message += f" Provider message: {detail}"
+            raise RuntimeError(message) from e
         except Exception as e:
-            print(f"[PromptEnhancer] ERROR: {e} — returning original prompt", flush=True)
-            return (prompt,)
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"Prompt Enhancer request failed for {backend}: {e}") from e
+        finally:
+            # The OpenAI-compatible Ollama endpoint does not reliably expose the native
+            # keep_alive option, so explicitly unload through /api/generate as well.
+            unload_ollama_model()
 
 
 @routes.get("/prompt_enhancer/presets")
@@ -2008,7 +2618,7 @@ async def prompt_enhancer_presets(request):
 
 @routes.post("/prompt_enhancer/models")
 async def prompt_enhancer_models(request):
-    """Fetch available models from a backend's /models endpoint."""
+    """Fetch available models for the Prompt Enhancer."""
     try:
         body = await request.json()
     except Exception:
@@ -2026,6 +2636,8 @@ async def prompt_enhancer_models(request):
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+        if "nano-gpt.com" in api_url.lower():
+            headers["X-API-Key"] = api_key
 
     def parse_models(data):
         if "models" in data:
@@ -2067,14 +2679,41 @@ async def prompt_enhancer_models(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+class LoraSidecarSaver:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"forceInput": True}),
+                "filename": ("STRING", {"forceInput": True}),
+                "folder": ("STRING", {"default": ""}),
+                "existing_file": (["overwrite", "skip"],),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("status",)
+    FUNCTION = "save"
+    CATEGORY = "Lokitsars/Training"
+    OUTPUT_NODE = True
+
+    def save(self, text, filename, folder, existing_file):
+        result = DatasetSidecarWriter().write(text, filename, folder, existing_file)
+        if result["status"] == "skipped":
+            return (f"Skipped existing: {result['path']}",)
+        return (result["path"],)
+
+
 NODE_CLASS_MAPPINGS = {
     "WorkflowGallery": WorkflowGallery,
     "PromptLibrary": PromptLibrary,
     "PromptEnhancer": PromptEnhancer,
+    "LoraSidecarSaver": LoraSidecarSaver,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WorkflowGallery": "Workflow Gallery",
     "PromptLibrary": "Prompt Library",
     "PromptEnhancer": "Prompt Enhancer",
+    "LoraSidecarSaver": "LoRA Sidecar Saver",
 }
