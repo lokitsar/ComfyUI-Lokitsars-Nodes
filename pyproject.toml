@@ -1,7 +1,7 @@
 [project]
 name = "lokitsars-nodes"
 # Current release metadata
-version = "0.1.21"
+version = "0.1.22"
 description = "A suite of ComfyUI custom nodes: an in-node image gallery, a prompt library, and an LLM prompt enhancer."
 readme = "README.md"
 requires-python = ">=3.10"

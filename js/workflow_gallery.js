@@ -504,6 +504,13 @@ function buildPromptSections(entry, container) {
   if (seed) container.appendChild(makeSection("🌱 Seed", seed, seed, false));
   if (positive) container.appendChild(makeSection("Positive", positive, positive, true));
   if (negative) container.appendChild(makeSection("Negative", negative, negative, false));
+
+  const src = getPromptSource(entry);
+  if (src) {
+    container.appendChild(
+      el("div", { style: { fontSize: "10px", opacity: "0.5", padding: "2px 6px", textAlign: "right" } }, [`prompt source: ${src}`])
+    );
+  }
 }
 
 
@@ -864,6 +871,47 @@ function attachDom(node) {
     domWidget.element.style.display = "block";
   }
 
+  // --- Height sync ---
+  // Newer ComfyUI frontends no longer give DOM widgets a constrained height,
+  // so the root's `height:100%` resolves to content height, overflow:auto
+  // never triggers, and thumbnails clip at the node boundary with no scroll.
+  // Fix: set an explicit pixel height, preferring the wrapper the frontend
+  // sized for us, falling back to node canvas size minus the widget offset.
+  const syncHeight = () => {
+    let h = 0;
+    const parent = root.parentElement;
+    if (parent && parent.clientHeight > 60) {
+      h = parent.clientHeight;
+    }
+    if (!h) {
+      const y = typeof domWidget?.y === "number" ? domWidget.y : 0;
+      const nodeH = node.size?.[1] || GALLERY_HEIGHT;
+      h = Math.max(300, nodeH - y - 16);
+    }
+    root.style.height = `${h}px`;
+  };
+  node.__wgState.syncHeight = syncHeight;
+
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => syncHeight());
+    node.__wgResizeObserver = ro;
+    requestAnimationFrame(() => {
+      if (root.parentElement) ro.observe(root.parentElement);
+      syncHeight();
+    });
+  } else {
+    requestAnimationFrame(syncHeight);
+  }
+  setTimeout(syncHeight, 300);
+
+  // --- Wheel handling ---
+  // Recent frontends let the canvas capture wheel events over DOM widgets,
+  // which zooms the graph instead of scrolling the gallery. Stop propagation
+  // so native scrolling inside the widget works; don't preventDefault.
+  root.addEventListener("wheel", (e) => {
+    e.stopPropagation();
+  }, { passive: true });
+
   node.size = [Math.max(node.size?.[0] || 0, 420), Math.max(node.size?.[1] || 0, 900)];
 
   // Initial load with retry — handles the race condition where the browser
@@ -916,12 +964,17 @@ app.registerExtension({
         document.removeEventListener("keydown", this.__wgKeyHandler);
         this.__wgKeyHandler = null;
       }
+      if (this.__wgResizeObserver) {
+        this.__wgResizeObserver.disconnect();
+        this.__wgResizeObserver = null;
+      }
       return onRemoved?.apply(this, arguments);
     };
 
     const onResize = nodeType.prototype.onResize;
     nodeType.prototype.onResize = function (size) {
       const state = this.__wgState;
+      state?.syncHeight?.();
       if (state && state.compareWrap?.style.display !== "none") {
         const stageH = getCompareStageHeight(this);
         state.compareStage.style.height = `${stageH}px`;
