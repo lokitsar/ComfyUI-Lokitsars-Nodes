@@ -1,10 +1,29 @@
 # Lokitsar's Nodes
 
-A suite of ComfyUI custom nodes for reviewing, comparing, exporting, and reusing generated images and prompts — all without leaving ComfyUI.
+A suite of ComfyUI custom nodes for reviewing and comparing generated images,
+managing reusable prompts, enhancing prompts with local or cloud language models,
+and writing LoRA caption sidecars — all without leaving ComfyUI.
 
 ## Version
 
 Current release: **v0.1.22**
+
+### What's new in v0.1.22
+
+- Expanded **Prompt Enhancer** with an in-node control panel, a native
+  **ComfyUI Local** backend, reusable connected `CLIP` support, and selectable
+  text-encoder wrappers.
+- Added model-aware presets for **MiniMax H3 Base, Frame-to-Frame, Last-Frame,
+  and Reference** workflows alongside Flux/Z-Image, Illustrious, LTX, and Wan.
+- Improved vision prompting, reasoning cleanup, provider authentication and error
+  messages, deterministic seeds, and automatic Ollama unloading to release VRAM.
+- Added packaged Danbooru guidance for more accurate Illustrious/SDXL Anime prompts.
+- Improved **Workflow Gallery** prompt tracing, source labels, Prompt Enhancer
+  output capture, scrolling, resizing, cache cleanup, and saved-session recovery.
+- Improved **Prompt Library** wildcard lookup with `.txt`, YAML, nested YAML keys,
+  recursive expansion, deterministic seeds, and faster cached path resolution.
+- Added **LoRA Sidecar Saver** for safely writing matching `.txt` caption files.
+- Moved the full LoRA dataset builder into its own dedicated repository.
 
 ## Why I made this
 
@@ -14,11 +33,12 @@ A practical use case is generating multiple showcase images for wildcard packs, 
 
 ## Nodes
 
-This package includes three nodes:
+This package includes four nodes:
 
 - **Workflow Gallery** — image gallery, viewer, comparison, and export (`image/ui`)
 - **Prompt Library** — save, search, and reuse prompts across workflows (`utils/prompt`)
 - **Prompt Enhancer** — expand a rough idea (and/or a reference image) into a model-tuned generation prompt via a local or cloud LLM (`utils/prompt`)
+- **LoRA Sidecar Saver** — write a generated caption beside training media using a safe matching filename (`Lokitsars/Training`)
 
 ---
 
@@ -67,7 +87,10 @@ This package includes three nodes:
 
 ### Prompt Resolution
 - Prompts are resolved directly from the live workflow graph, scoped to the sampler connected to your gallery node
-- Supports wildcard nodes, string nodes, primitive nodes, Prompt Library nodes, and any other upstream text-feeding nodes
+- Supports wildcard nodes, string nodes, primitive nodes, Prompt Library, Prompt Enhancer, and other upstream text-feeding nodes
+- Captures the Prompt Enhancer's actual runtime output instead of displaying its rough input prompt
+- Displays the detected prompt source in the viewer so you can tell how it was resolved
+- Optional positive and negative override sockets accept the exact strings used by unusual workflows
 - Handles `ConditioningZeroOut` correctly — no bleed from positive to negative
 - Works correctly in workflows with multiple samplers
 
@@ -81,6 +104,8 @@ This package includes three nodes:
 | output_directory | STRING | output/workflow_gallery | Where exported images are saved |
 | filename_prefix | STRING | workflow_gallery | Prefix used for saved filenames |
 | max_images | INT | 48 | Maximum number of images to keep in the gallery |
+| positive_override | STRING | — | Optional wired ground-truth positive prompt |
+| negative_override | STRING | — | Optional wired ground-truth negative prompt |
 
 ---
 
@@ -99,6 +124,11 @@ A persistent prompt manager that lives directly in your workflow. Save, search, 
 - Second click on a selected prompt deselects it
 - Export your entire library as **JSON** or **CSV**
 - Library persists across restarts
+- Expand `__file__` wildcards from the packaged `wildcards/` folder, ComfyUI's
+  wildcard folder, Impact Pack, or additional folders you specify
+- Supports `.txt`, `.yaml`, and `.yml`, including nested keys such as
+  `__colors/dark__`, plus inline choices such as `{red|green|blue}`
+- Recursively expands nested wildcards with a deterministic seed
 
 ### How to use
 1. Add the **Prompt Library** node to your workflow
@@ -106,6 +136,17 @@ A persistent prompt manager that lives directly in your workflow. Save, search, 
 3. Select a saved prompt from the list — it becomes the output string immediately
 4. Optionally type additional text in the manual input and choose whether it goes before or after the selected prompt
 5. Save new prompts using **+ Add**, **💾 Save Current**, or the **Save Prompt** button in the Workflow Gallery viewer
+
+### Node Inputs
+
+| Input | Type | Default | Description |
+|---|---|---|---|
+| selected_prompt_id | STRING | — | Selected library prompt, managed by the in-node interface |
+| manual_text | STRING | — | Additional text or a complete manual prompt |
+| manual_position | CHOICE | after | Place manual text before or after the selected prompt |
+| expand_wildcards | BOOLEAN | false | Expand file and inline wildcard expressions each queue |
+| wildcard_path | STRING | — | Optional comma-separated additional wildcard folders |
+| seed | INT | 0 | Deterministic wildcard selection seed |
 
 ---
 
@@ -121,6 +162,10 @@ Turn a rough idea — or a reference image — into a detailed prompt tuned to t
   - **Illustrious / SDXL Anime** — Danbooru tags with the correct rating and quality tags
   - **LTX Video 2.3** — cinematic single-shot video prompt with audio
   - **Wan 2.2 Video** — cinematic motion prompt
+  - **MiniMax H3 Base** — text-to-video+audio or image-to-video+audio direction
+  - **MiniMax H3 Frame-to-Frame** — first/last-frame video+audio direction
+  - **MiniMax H3 Last-Frame** — last-image-to-video+audio direction
+  - **MiniMax H3 Reference** — reference-to-video+audio direction
   - **Custom** — general-purpose enhancement
 - **Text-to-X vs Image-to-X**: with no image connected the node writes a text-to-image/video prompt; connect an image and it automatically switches to the matching image-to-video / image-reference preset for the selected model (for video models, it describes the motion that plays out from the frame rather than re-describing the still)
 - **🔌 Connect** — fetches the available model list from your API and fills the model dropdown, or checks the local encoder selection
@@ -128,7 +173,10 @@ Turn a rough idea — or a reference image — into a detailed prompt tuned to t
 - **↺ Reset** — restores the system prompt from the selected preset
 - **thinking_mode** toggle — suppresses chain-of-thought on models that support it (works across backends)
 - **manual_addons** — extra instructions appended to every request
-- Graceful fallback — if the LLM call fails, your original prompt passes through unchanged
+- Cleans leaked reasoning, analysis scaffolding, preambles, and self-revision from the returned prompt
+- Uses actionable errors for authentication, connection, empty-response, incompatible local encoder, and generation failures
+- Explicitly unloads Ollama after a request so its model does not continue occupying VRAM needed by ComfyUI
+- Disabled mode passes the original prompt through unchanged
 
 ### Backends
 All OpenAI-compatible `/chat/completions` endpoints:
@@ -146,7 +194,12 @@ All OpenAI-compatible `/chat/completions` endpoints:
 For the lowest VRAM use, load the encoder with ComfyUI's normal **Load CLIP** node and connect its `CLIP` output to Prompt Enhancer. Otherwise, select the file under `local_text_encoder` and choose the same `local_clip_type` you would use in **Load CLIP**.
 
 ### Image input (vision models)
-Connect an `IMAGE` to use a vision-capable model (e.g. a local Qwen2.5-VL, or a cloud VL model) to read the picture and write a prompt from it. A non-reasoning instruction-tuned vision model gives the cleanest results.
+Connect an `IMAGE` to use a vision-capable model (for example Qwen-VL locally or
+through a cloud provider) to read the reference and write a prompt from it. The
+node automatically selects the matching hidden vision preset unless you edited
+the system prompt manually. For H3, the reference is labeled according to the
+selected Base, Frame-to-Frame, Last-Frame, or Reference mode. A non-reasoning
+instruction-tuned vision model generally gives the cleanest result.
 
 ### Content
 Paired with a local, uncensored model, the enhancer describes content faithfully across the full range from everyday to explicit, instead of omitting obvious details. All subjects are treated as adults; the node never produces sexual, nude, or suggestive descriptions of anyone who is or appears to be a minor.
@@ -158,8 +211,10 @@ Paired with a local, uncensored model, the enhancer describes content faithfully
 | enabled | BOOLEAN | true | Toggle the enhancer on/off (off passes the prompt through) |
 | backend | CHOICE | Ollama | Ollama / OpenRouter / NanoGPT / Kobold / ComfyUI Local |
 | api_url | STRING | localhost Ollama | Endpoint; auto-fills when you switch backend |
-| api_key | STRING | — | Active key (auto-fills from the saved cloud keys) |
-| model_name | STRING | — | Model id; set via **Connect** or typed |
+| api_key | STRING | — | Active key; falls back to the matching saved provider key |
+| openrouter_key | STRING | — | Saved OpenRouter key |
+| nanogpt_key | STRING | — | Saved NanoGPT key |
+| model_name | STRING | llama3 | API model id; set via **Connect** or typed |
 | local_text_encoder | CHOICE | connected CLIP | File from `models/text_encoders` used by ComfyUI Local |
 | local_clip_type | CHOICE | flux2 | Wrapper/type matching ComfyUI's **Load CLIP** node |
 | target_model | CHOICE | Flux / Z-Image | Which model the output prompt is tuned for |
@@ -171,6 +226,29 @@ Paired with a local, uncensored model, the enhancer describes content faithfully
 | prompt | STRING | — | (optional) rough prompt to enhance |
 | image | IMAGE | — | (optional) reference image for vision models |
 | clip | CLIP | — | (optional) reuse an already-loaded local text encoder |
+
+---
+
+## LoRA Sidecar Saver
+
+Write generated caption text as a `.txt` sidecar with the same stem as an image
+filename. This is useful for simple LoRA workflows that already produce captions
+inside ComfyUI but do not need the complete dataset-building application.
+
+The node normalizes paths, creates the destination folder when needed, removes
+unsafe filename characters, protects Windows reserved filenames, and writes
+atomically so an interrupted save does not leave a partial caption.
+
+### Node Inputs
+
+| Input | Type | Default | Description |
+|---|---|---|---|
+| text | STRING | — | Caption text supplied by another node |
+| filename | STRING | — | Image filename or stem used to name the `.txt` sidecar |
+| folder | STRING | — | Destination folder for the caption file |
+| existing_file | CHOICE | overwrite | Overwrite an existing sidecar or skip it |
+
+The output is a status string containing the written path or the skipped file.
 
 ---
 
@@ -189,9 +267,14 @@ reporting, and App Mode workflow.
 Search for **Workflow Gallery** in ComfyUI Manager and install directly.
 
 ### Option 2 — Manual
-1. Copy this folder into `ComfyUI/custom_nodes/` (folder name `ComfyUI-Lokitsars-Nodes`)
-2. Restart ComfyUI
-3. Find **Workflow Gallery** under `image/ui` and **Prompt Library** under `utils/prompt`
+1. Clone or copy this folder into `ComfyUI/custom_nodes/` using the folder name
+   `ComfyUI-Lokitsars-Nodes`
+2. From the Python environment that launches ComfyUI, run
+   `python -m pip install -e ComfyUI/custom_nodes/ComfyUI-Lokitsars-Nodes`
+3. Restart ComfyUI and hard-refresh the browser
+4. Find **Workflow Gallery** under `image/ui`, **Prompt Library** and
+   **Prompt Enhancer** under `utils/prompt`, and **LoRA Sidecar Saver** under
+   `Lokitsars/Training`
 
 ```text
 ComfyUI/
@@ -236,12 +319,23 @@ ComfyUI/
 4. The saved prompt appears in your Prompt Library node immediately after clicking Refresh
 5. Select it from the list — it feeds directly into your encoder on the next generation
 
+### Prompt Enhancer workflow
+
+1. Add Prompt Enhancer and connect a rough `STRING`, an `IMAGE`, or both
+2. Choose the target generation model and either an API backend or ComfyUI Local
+3. Click **Connect** to discover API models or verify the local encoder selection
+4. Connect `enhanced_prompt` to the text encoder or prompt consumer in your workflow
+
+### LoRA sidecar workflow
+
+1. Connect generated caption text to `text`
+2. Connect or provide the corresponding image filename
+3. Choose the dataset folder and whether existing captions should be overwritten
+4. Queue the node to write the matching `.txt` file
+
 ---
 
 ## Screenshots
-
-### Workflow Example
-![Workflow Example](screenshots/workflow.png)
 
 ### Gallery View
 ![Gallery View](screenshots/Screenshot%202026-03-08%20000942.png)
