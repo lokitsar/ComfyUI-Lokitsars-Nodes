@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy Pillow
+          pip install numpy Pillow PyYAML
 
       - name: Check for unresolved merge markers
         run: |
