@@ -23,7 +23,6 @@ Current release: **v0.1.22**
 - Improved **Prompt Library** wildcard lookup with `.txt`, YAML, nested YAML keys,
   recursive expansion, deterministic seeds, and faster cached path resolution.
 - Added **LoRA Sidecar Saver** for safely writing matching `.txt` caption files.
-- Moved the full LoRA dataset builder into its own dedicated repository.
 
 ## Why I made this
 
@@ -249,15 +248,6 @@ atomically so an interrupted save does not leave a partial caption.
 | existing_file | CHOICE | overwrite | Overwrite an existing sidecar or skip it |
 
 The output is a status string containing the written path or the skipped file.
-
----
-
-## LoRA Dataset Caption Suite
-
-The LoRA dataset builder now lives in its own repository and ComfyUI custom-node
-package: [LoRA Dataset Caption Suite](https://github.com/lokitsar/Lora-Dataset-Caption-Suite).
-Install that package for the automated cleanup, captioning, crop, validation,
-reporting, and App Mode workflow.
 
 ---
 
