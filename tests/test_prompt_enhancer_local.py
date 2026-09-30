@@ -64,6 +64,25 @@ class _FakeClip:
 
 
 class TestPromptEnhancerLocal(unittest.TestCase):
+    def test_krea2_text_and_vision_presets_are_available(self):
+        nodes, output_dir = _load_nodes_module()
+        self.addCleanup(shutil.rmtree, output_dir, True)
+
+        text_preset = nodes.PROMPT_ENHANCER_PRESETS["Krea2"]
+        vision_preset = nodes.PROMPT_ENHANCER_PRESETS["Krea2 (Vision)"]
+        target_models = nodes.PromptEnhancer.INPUT_TYPES()["required"]["target_model"][0]
+
+        self.assertIn("Krea2", target_models)
+        self.assertNotIn("Krea2 (Vision)", target_models)
+        self.assertIn("LoRA trigger", text_preset)
+        self.assertIn("Preserve unusual trigger tokens", text_preset)
+        self.assertIn("exact quantities", text_preset)
+        self.assertIn("still-image prompt", text_preset)
+        self.assertIn("evidence-based visual captioning", vision_preset)
+        self.assertIn("Never complete cropped clothing", vision_preset)
+        self.assertIn("never hallucinate unreadable text", vision_preset)
+        self.assertIn("amber-colored liquid", vision_preset)
+
     def test_connected_clip_generates_without_http_backend(self):
         nodes, output_dir = _load_nodes_module()
         self.addCleanup(shutil.rmtree, output_dir, True)

@@ -159,6 +159,7 @@ Turn a rough idea — or a reference image — into a detailed prompt tuned to t
 - Outputs a `STRING` — connect it to a CLIPTextEncode `text` input or any string consumer
 - **Target-model presets**, each written to that model's actual prompting rules:
   - **Flux / Z-Image** — natural-language description, no negatives
+  - **Krea2** — faithful natural-language visual construction; image mode becomes evidence-only reverse captioning
   - **Illustrious / SDXL Anime** — Danbooru tags with the correct rating and quality tags
   - **LTX Video 2.3** — cinematic single-shot video prompt with audio
   - **Wan 2.2 Video** — cinematic motion prompt
@@ -199,7 +200,10 @@ through a cloud provider) to read the reference and write a prompt from it. The
 node automatically selects the matching hidden vision preset unless you edited
 the system prompt manually. For H3, the reference is labeled according to the
 selected Base, Frame-to-Frame, Last-Frame, or Reference mode. A non-reasoning
-instruction-tuned vision model generally gives the cleanest result.
+instruction-tuned vision model generally gives the cleanest result. Krea2 image
+mode uses a stricter evidence-only caption preset: it describes observable pixels,
+composition, lighting, and medium without completing cropped details or guessing
+identities, brands, camera metadata, unreadable text, or narrative context.
 
 ### Content
 Paired with a local, uncensored model, the enhancer describes content faithfully across the full range from everyday to explicit, instead of omitting obvious details. All subjects are treated as adults; the node never produces sexual, nude, or suggestive descriptions of anyone who is or appears to be a minor.
